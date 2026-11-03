@@ -1,6 +1,10 @@
 import {choices, integer, queryFrom, scopeParams, tenantScope, tenantValues} from '../../state/scope.js';
 import {withParams} from '../../router.js';
 
+export function drilldownScrollBehavior(matchMedia = globalThis.matchMedia?.bind(globalThis)) {
+  return matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth';
+}
+
 export const PIVOT_OPTIONS = [
   ['rule_description', 'Deskripsi rule'],
   ['rule_id', 'Rule ID'],

@@ -96,8 +96,87 @@ CREATE INDEX IF NOT EXISTS idx_wazuh_alerts_status ON wazuh.alerts((parsed_detai
 """
 
 
+import secrets
+import threading
 import time
 from urllib.parse import urlparse, urlunparse, unquote
+
+_preview_lock = threading.Lock()
+_profile_lock = threading.RLock()
+_preview_registry: dict[str, dict[str, Any]] = {}
+PREVIEW_TOKEN_TTL = 60.0
+MAX_PREVIEW_REGISTRY_SIZE = 500
+
+
+def _clean_expired_previews_locked(now: float) -> None:
+    expired = [tok for tok, item in _preview_registry.items() if now > item.get("expires_at", 0)]
+    for tok in expired:
+        _preview_registry.pop(tok, None)
+
+
+def create_preview_token(kind: str, profile_id: str, criteria: dict[str, Any], count: int) -> str:
+    with _preview_lock:
+        now = time.time()
+        _clean_expired_previews_locked(now)
+        # Cap registry capacity (LRU / FIFO eviction of oldest tokens if full)
+        if len(_preview_registry) >= MAX_PREVIEW_REGISTRY_SIZE:
+            oldest_tokens = sorted(_preview_registry.keys(), key=lambda k: _preview_registry[k].get("created_at", 0))
+            num_to_evict = len(_preview_registry) - MAX_PREVIEW_REGISTRY_SIZE + 1
+            for tok in oldest_tokens[:num_to_evict]:
+                _preview_registry.pop(tok, None)
+
+        token = secrets.token_hex(16)
+        _preview_registry[token] = {
+            "kind": kind,
+            "profile_id": profile_id,
+            "criteria": criteria,
+            "count": count,
+            "created_at": now,
+            "expires_at": now + PREVIEW_TOKEN_TTL,
+        }
+        return token
+
+
+def validate_and_consume_preview_token(token: str | None, kind: str, profile_id: str, criteria: dict[str, Any]) -> dict[str, Any]:
+    if not token or not str(token).strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Eksekusi pembersihan memerlukan server-side preview_token yang valid. Buat pratinjau terlebih dahulu."
+        )
+    token_str = str(token).strip()
+    with _preview_lock:
+        now = time.time()
+        _clean_expired_previews_locked(now)
+        # Atomic single-use consumption: exactly one thread gets entry, others get None
+        entry = _preview_registry.pop(token_str, None)
+
+    if not entry:
+        raise HTTPException(
+            status_code=400,
+            detail="Preview token tidak valid, telah kedaluwarsa (berlaku 60 detik), atau sudah digunakan (single-use). Lakukan pratinjau ulang."
+        )
+    if now > entry["expires_at"]:
+        raise HTTPException(
+            status_code=400,
+            detail="Preview token telah kedaluwarsa (berlaku 60 detik). Lakukan pratinjau ulang."
+        )
+    if entry["profile_id"] != profile_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Target profil database telah berubah dari '{entry['profile_id']}' menjadi '{profile_id}'. Eksekusi dibatalkan demi keamanan."
+        )
+    if entry["kind"] != kind:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Preview token tidak sesuai jenis operasi ({entry['kind']} != {kind})."
+        )
+    if entry["criteria"] != criteria:
+        raise HTTPException(
+            status_code=400,
+            detail="Kriteria pembersihan tidak cocok dengan pratinjau yang disetujui. Lakukan pratinjau ulang."
+        )
+    return entry
+
 
 _active_profile = ACTIVE_DB_PROFILE
 _db_profiles: dict[str, dict[str, Any]] = {
@@ -149,10 +228,11 @@ def get_active_profile() -> dict[str, Any]:
 
 def set_active_profile(profile_id: str) -> dict[str, Any]:
     global _active_profile
-    if profile_id not in _db_profiles:
-        raise HTTPException(status_code=400, detail=f"Database profile '{profile_id}' not found.")
-    _active_profile = profile_id
-    return get_active_profile()
+    with _profile_lock:
+        if profile_id not in _db_profiles:
+            raise HTTPException(status_code=400, detail=f"Database profile '{profile_id}' not found.")
+        _active_profile = profile_id
+        return get_active_profile()
 
 
 def update_profile_url(profile_id: str, new_url: str) -> dict[str, Any]:
@@ -193,9 +273,17 @@ def test_db_connection(url: str | None = None, *, profile_id: str | None = None)
 
 def get_db_connection(profile_id: str | None = None):
     """Returns a psycopg connection with dictionary row formatting for the active profile."""
-    prof = _db_profiles.get(profile_id or _active_profile, _db_profiles["local"])
+    with _profile_lock:
+        target_pid = profile_id or _active_profile
+        prof = _db_profiles.get(target_pid, _db_profiles["local"])
     try:
-        return psycopg.connect(prof["url"], row_factory=dict_row)
+        conn = psycopg.connect(prof["url"], row_factory=dict_row)
+        try:
+            conn._arbiter_profile_id = prof["id"]
+            conn._arbiter_profile_mode = prof["mode"]
+        except (AttributeError, TypeError):
+            pass
+        return conn
     except Exception as exc:
         raise HTTPException(
             status_code=503,
@@ -274,30 +362,56 @@ def purge_alerts(
     time_to: str | None = None,
     tenant: str = "all",
     dry_run: bool = True,
+    preview_token: str | None = None,
+    expected_profile: str | None = None,
 ) -> dict[str, Any]:
-    active = _db_profiles.get(_active_profile, _db_profiles["local"])
+    raw_pid = getattr(conn, "_arbiter_profile_id", None)
+    conn_pid = raw_pid if isinstance(raw_pid, str) else None
+    with _profile_lock:
+        current_active = _active_profile
+        if conn_pid and conn_pid != current_active:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Profil database beralih di tengah pemrosesan ('{conn_pid}' -> '{current_active}'). Permintaan dibatalkan.",
+            )
+        active = _db_profiles.get(conn_pid or current_active, _db_profiles["local"])
+
+    if expected_profile and str(expected_profile).strip() != active["id"]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Target profil database tidak cocok (aktif: '{active['id']}', diharapkan: '{expected_profile}').",
+        )
     if not dry_run and active["mode"] == "read_only":
         raise HTTPException(
             status_code=403,
             detail=f"Database '{active['name']}' dalam mode Read-Only. Beralih ke profil Laptop (Lokal) untuk pembersihan data.",
         )
 
+    criteria = {
+        "tenant": tenant or "all",
+        "older_than_days": older_than_days,
+        "time_from": str(time_from).strip() if time_from else "",
+        "time_to": str(time_to).strip() if time_to else "",
+    }
+
     clauses: list[str] = []
     params: list[Any] = []
     if tenant and tenant != "all":
         clauses.append("tenant = %s")
         params.append(tenant)
-    if older_than_days and older_than_days > 0:
+    if older_than_days is not None:
+        if older_than_days <= 0 or older_than_days > 36500:
+            raise HTTPException(status_code=400, detail="Parameter older_than_days harus berupa bilangan bulat positif.")
         from datetime import datetime, timezone, timedelta
         cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
         clauses.append("timestamp < %s")
         params.append(cutoff)
-    if time_from and time_from.strip():
+    if time_from and str(time_from).strip():
         clauses.append("timestamp >= %s")
-        params.append(time_from.strip())
-    if time_to and time_to.strip():
+        params.append(str(time_from).strip())
+    if time_to and str(time_to).strip():
         clauses.append("timestamp <= %s")
-        params.append(time_to.strip())
+        params.append(str(time_to).strip())
 
     if not clauses:
         raise HTTPException(status_code=400, detail="Tentukan minimal satu filter pembersihan (rentang waktu, hari, atau tenant).")
@@ -307,10 +421,13 @@ def purge_alerts(
     matching = conn.execute(count_sql, params).fetchone()["n"]
 
     if dry_run:
-        return {"dry_run": True, "count": matching}
+        token = create_preview_token("alerts", active["id"], criteria, matching)
+        return {"dry_run": True, "count": matching, "preview_token": token, "profile": active["id"]}
 
-    conn.execute(f"DELETE FROM wazuh.alerts {where_sql}", params)
-    return {"dry_run": False, "deleted": matching}
+    validate_and_consume_preview_token(preview_token, "alerts", active["id"], criteria)
+    cur = conn.execute(f"DELETE FROM wazuh.alerts {where_sql}", params)
+    actual_deleted = cur.rowcount if (cur and hasattr(cur, "rowcount") and cur.rowcount is not None and cur.rowcount >= 0) else matching
+    return {"dry_run": False, "deleted": actual_deleted}
 
 
 def purge_incidents(
@@ -318,13 +435,36 @@ def purge_incidents(
     *,
     status_filter: str = "closed_only",
     dry_run: bool = True,
+    preview_token: str | None = None,
+    expected_profile: str | None = None,
 ) -> dict[str, Any]:
-    active = _db_profiles.get(_active_profile, _db_profiles["local"])
+    raw_pid = getattr(conn, "_arbiter_profile_id", None)
+    conn_pid = raw_pid if isinstance(raw_pid, str) else None
+    with _profile_lock:
+        current_active = _active_profile
+        if conn_pid and conn_pid != current_active:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Profil database beralih di tengah pemrosesan ('{conn_pid}' -> '{current_active}'). Permintaan dibatalkan.",
+            )
+        active = _db_profiles.get(conn_pid or current_active, _db_profiles["local"])
+
+    if expected_profile and str(expected_profile).strip() != active["id"]:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Target profil database tidak cocok (aktif: '{active['id']}', diharapkan: '{expected_profile}').",
+        )
     if not dry_run and active["mode"] == "read_only":
         raise HTTPException(
             status_code=403,
             detail=f"Database '{active['name']}' dalam mode Read-Only. Beralih ke profil Laptop (Lokal) untuk pembersihan data.",
         )
+
+    valid_statuses = {"closed_only", "all", "closed", "resolved", "open", "in_progress"}
+    if status_filter not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Kriteria kasus '{status_filter}' tidak valid.")
+
+    criteria = {"status_filter": status_filter}
 
     clauses: list[str] = []
     params: list[Any] = []
@@ -341,10 +481,13 @@ def purge_incidents(
     matching = conn.execute(count_sql, params).fetchone()["n"]
 
     if dry_run:
-        return {"dry_run": True, "count": matching}
+        token = create_preview_token("incidents", active["id"], criteria, matching)
+        return {"dry_run": True, "count": matching, "preview_token": token, "profile": active["id"]}
 
-    conn.execute(f"DELETE FROM wazuh.analysis_groups {where_sql}", params)
-    return {"dry_run": False, "deleted": matching}
+    validate_and_consume_preview_token(preview_token, "incidents", active["id"], criteria)
+    cur = conn.execute(f"DELETE FROM wazuh.analysis_groups {where_sql}", params)
+    actual_deleted = cur.rowcount if (cur and hasattr(cur, "rowcount") and cur.rowcount is not None and cur.rowcount >= 0) else matching
+    return {"dry_run": False, "deleted": actual_deleted}
 
 
 @contextmanager

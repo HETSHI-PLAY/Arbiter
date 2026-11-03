@@ -22,6 +22,7 @@ function harness(t, params = 'tenant=Synthetic+North&facet=rule_id&facet_value=4
   }
   const root = {
     innerHTML: '',
+    classList: {values: new Set(), add(v){this.values.add(v)}, remove(v){this.values.delete(v)}, contains(v){return this.values.has(v)}},
     querySelector: selector => elements.get(selector) || null,
     addEventListener: (type, fn) => handlers.set(type, fn),
   };
@@ -41,8 +42,30 @@ function harness(t, params = 'tenant=Synthetic+North&facet=rule_id&facet_value=4
       matches: selector => selector === '[data-select-drilldown]' ? 'selectDrilldown' in dataset : 'selectSecondaryKey' in dataset}});
   }
   return {requests, root, elements, controller, dispose, click, change, navigations, notices,
+    key: (target, key) => handlers.get('keydown')({target, key, preventDefault(){}}),
     results: elements.get('#stats-results')};
 }
+
+test('statistics route releases its styling class on disposal', async t => {
+  const h = harness(t, 'chart=table');
+  h.requests[0].respond({total:0});
+  await flush();
+  assert.equal(h.root.classList.contains('stats-page'), true);
+  h.dispose();
+  assert.equal(h.root.classList.contains('stats-page'), false);
+});
+
+test('stacked segment keyboard activation carries both facets', async t => {
+  const h = harness(t, 'pivot_by=rule_id&secondary_pivot=url_path');
+  h.requests[0].respond({total:0});
+  await flush();
+  const target = {id:'',dataset:{primaryKey:'42',secondaryKey:'/synthetic'},matches:s=>s==='[data-secondary-key]'};
+  h.key(target, 'Enter');
+  assert.equal(h.navigations.length, 1);
+  const p = new URLSearchParams(h.navigations[0].split('?')[1]);
+  assert.equal(p.get('facet_value'),'42');
+  assert.equal(p.get('secondary_facet_value'),'/synthetic');
+});
 
 async function startSample(h, label = 'Synthetic original') {
   h.requests[0].respond(stats(label));
@@ -134,4 +157,26 @@ test('late sample response cannot overwrite a newer completed statistics request
   h.requests[1].respond({items: [alert(11)]});
   await flush();
   assert.equal(h.results.innerHTML, latest, 'stale sample must not render or mutate evidence');
+});
+
+test('clicking toggle-all-secondary in view expands and collapses the top 10 secondary list', async t => {
+  const h = harness(t, 'facet=rule_id&facet_value=42&secondary_pivot=url_path&chart=table');
+  const items = Array.from({length: 14}, (_, i) => ({key: `/p/${i}`, count: 20 - i}));
+  h.requests[0].respond({total: 100, metric: 'alerts', pivot_by: 'rule_id', secondary_pivot: 'url_path', items: [{key: '42', count: 100}], secondary_breakdown: items});
+  await flush();
+  h.requests[1].respond({items: []});
+  await flush();
+  // Initially collapsed: top 10 only (/p/0 to /p/9, not /p/13)
+  assert.match(h.results.innerHTML, /Tampilkan semua/);
+  assert.doesNotMatch(h.results.innerHTML, /data-select-secondary-key="\/p\/13"/);
+
+  // Click toggle
+  await h.click({statsAction: 'toggle-all-secondary'});
+  assert.match(h.results.innerHTML, /Tampilkan lebih sedikit/);
+  assert.match(h.results.innerHTML, /data-select-secondary-key="\/p\/13"/);
+
+  // Click toggle again to collapse
+  await h.click({statsAction: 'toggle-all-secondary'});
+  assert.match(h.results.innerHTML, /Tampilkan semua/);
+  assert.doesNotMatch(h.results.innerHTML, /data-select-secondary-key="\/p\/13"/);
 });

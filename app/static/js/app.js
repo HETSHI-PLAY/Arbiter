@@ -16,7 +16,7 @@ const scopeParams=scope=>{const params=new URLSearchParams();for(const tenant of
 const selection=createSelection(routeScope(new URLSearchParams(location.hash.split('?')[1]||'')).key);
 let currentRoute, controller, cleanup, guard=null, notifyTimer, healthPending=false, lastHealth=null, routeVersion=0;
 const scrollPositions=new Map();
-const navigationMemory=createNavigationMemory();
+let navigationMemory=createNavigationMemory();
 const pageTitles={triage:'Triage',stats:'Statistik',incidents:'Insiden',imports:'Impor',reports:'Laporan',database:'Database'};
 for(const el of document.querySelectorAll('[data-icon]'))el.innerHTML=icon(el.dataset.icon);
 document.querySelector('#open-navigation').innerHTML=icon('menu');
@@ -63,7 +63,7 @@ async function render(route){
   try{
     const feature=await import(`./features/${route.page}/view.js`);
     if(version!==routeVersion)return;
-    const context={root:main,route,navigate:(...args)=>router.navigate(...args),selection,notify,signal:controller.signal,setGuard:fn=>{guard=fn;}};
+    const context={root:main,route,navigate:(...args)=>router.navigate(...args),selection,notify,databaseChanged,signal:controller.signal,setGuard:fn=>{guard=fn;}};
     const dispose=await feature.mount(context);
     if(version!==routeVersion){if(typeof dispose==='function')dispose();return;}
     cleanup=dispose;
@@ -84,7 +84,21 @@ async function health(force=false){
   try{const result=await probeConnection(()=>json('/api/health',{timeout:10000}),lastHealth);lastHealth=result.lastSuccess;el.dataset.state=result.state;el.querySelector('.connection-label').textContent=result.label;el.title=lastHealth?`${result.label} · Terakhir diperiksa ${lastHealth.toLocaleTimeString('id-ID')}`:result.label;}
   finally{healthPending=false;}
 }
-let tenantRows=[];
+let tenantRows=[], databaseEpoch=0, databaseUnverified=false;
+function databaseChanged(status){
+  databaseEpoch++;databaseUnverified=!status;
+  selection.clear();selection.setScope('all',true);
+  navigationMemory=createNavigationMemory();scrollPositions.clear();
+  tenantRows=status?.tenants||[];
+  if(currentRoute)currentRoute.params=new URLSearchParams('tenant=all');
+  history.replaceState(null,'','#/database?tenant=all');
+  window.dispatchEvent(new Event('arbiter:route-replaced'));
+  tenantSelect.textContent='Semua tenant';
+  tenantSelect.title=status?'Semua tenant':'Database belum terverifikasi; daftar tenant dikosongkan.';
+  tenantDialog.close();renderTenantOptions();
+  for(const link of document.querySelectorAll('.nav-link'))link.href=navigationMemory.destination(link.dataset.page,'all');
+  document.querySelector('.wordmark').href='#/triage?tenant=all';
+}
 function renderTenantOptions(){
   const scope=routeScope(currentRoute?.params||new URLSearchParams());
   const known=new Set(tenantRows.map(row=>String(row.tenant)));
@@ -94,8 +108,10 @@ function renderTenantOptions(){
   for(const input of tenantOptions.querySelectorAll('input[name="tenant"]'))input.disabled=all.checked;
 }
 async function tenants(){
-  try{const data=await json('/api/tenants',{timeout:10000});tenantRows=(data.tenants||[]);renderTenantOptions();}
-  catch{tenantSelect.title='Daftar tenant belum dapat diperbarui. Scope saat ini tetap dipertahankan.';}
+  if(databaseUnverified)return;
+  const epoch=databaseEpoch;
+  try{const data=await json('/api/tenants',{timeout:10000});if(epoch!==databaseEpoch)return;tenantRows=(data.tenants||[]);renderTenantOptions();}
+  catch{if(epoch===databaseEpoch)tenantSelect.title='Daftar tenant belum dapat diperbarui. Scope saat ini tetap dipertahankan.';}
 }
 tenantSelect.addEventListener('click',()=>{renderTenantOptions();tenantDialog.showModal();});
 tenantForm.addEventListener('change',event=>{

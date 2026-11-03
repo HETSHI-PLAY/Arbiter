@@ -1259,32 +1259,97 @@ def api_database_config(payload: dict[str, Any]):
 @app.post("/api/database/purge-alerts")
 def api_database_purge_alerts(payload: dict[str, Any]):
     older_than_days = payload.get("older_than_days")
-    if older_than_days is not None:
+    if older_than_days is not None and str(older_than_days).strip() != "":
         try:
             older_than_days = int(older_than_days)
+            if older_than_days <= 0 or older_than_days > 36500:
+                raise ValueError()
         except (ValueError, TypeError):
-            older_than_days = None
+            raise HTTPException(status_code=400, detail="Parameter older_than_days harus berupa bilangan bulat positif.")
+    else:
+        older_than_days = None
+
     time_from = payload.get("time_from")
+    if time_from and str(time_from).strip():
+        time_from = str(time_from).strip()
+        try:
+            from datetime import datetime
+            datetime.fromisoformat(time_from.replace("Z", "+00:00"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Format time_from tidak valid (gunakan ISO 8601).")
+    else:
+        time_from = ""
+
     time_to = payload.get("time_to")
-    tenant = payload.get("tenant", "all")
-    dry_run = bool(payload.get("dry_run", True))
+    if time_to and str(time_to).strip():
+        time_to = str(time_to).strip()
+        try:
+            from datetime import datetime
+            datetime.fromisoformat(time_to.replace("Z", "+00:00"))
+        except Exception:
+            raise HTTPException(status_code=400, detail="Format time_to tidak valid (gunakan ISO 8601).")
+    else:
+        time_to = ""
+
+    if time_from and time_to and time_from > time_to:
+        raise HTTPException(status_code=400, detail="Rentang waktu tidak valid: time_from harus sebelum atau sama dengan time_to.")
+
+    tenant = str(payload.get("tenant") or "all").strip()
+
+    if "dry_run" in payload:
+        if not isinstance(payload["dry_run"], bool):
+            raise HTTPException(status_code=400, detail="Parameter dry_run harus berupa boolean (true/false).")
+        dry_run = payload["dry_run"]
+    else:
+        dry_run = True
+
+    preview_token = payload.get("preview_token")
+    if not dry_run and (preview_token is None or not str(preview_token).strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="Eksekusi pembersihan memerlukan server-side preview_token yang valid. Lakukan pratinjau terlebih dahulu."
+        )
+
+    expected_profile = payload.get("expected_profile") or payload.get("profile")
+
     with get_db() as conn:
         if hasattr(db_module, "purge_alerts"):
             return db_module.purge_alerts(
                 conn, older_than_days=older_than_days, time_from=time_from,
                 time_to=time_to, tenant=tenant, dry_run=dry_run,
+                preview_token=preview_token, expected_profile=expected_profile,
             )
         return {"dry_run": dry_run, "count": 0}
 
 
 @app.post("/api/database/purge-incidents")
 def api_database_purge_incidents(payload: dict[str, Any]):
-    status_filter = str(payload.get("status") or "closed_only")
-    dry_run = bool(payload.get("dry_run", True))
+    status_filter = str(payload.get("status") or "closed_only").strip()
+    valid_statuses = {"closed_only", "all", "closed", "resolved", "open", "in_progress"}
+    if status_filter not in valid_statuses:
+        raise HTTPException(status_code=400, detail=f"Kriteria status insiden '{status_filter}' tidak valid.")
+
+    if "dry_run" in payload:
+        if not isinstance(payload["dry_run"], bool):
+            raise HTTPException(status_code=400, detail="Parameter dry_run harus berupa boolean (true/false).")
+        dry_run = payload["dry_run"]
+    else:
+        dry_run = True
+
+    preview_token = payload.get("preview_token")
+    if not dry_run and (preview_token is None or not str(preview_token).strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="Eksekusi pembersihan memerlukan server-side preview_token yang valid. Lakukan pratinjau terlebih dahulu."
+        )
+
+    expected_profile = payload.get("expected_profile") or payload.get("profile")
+
     with get_db() as conn:
         if hasattr(db_module, "purge_incidents"):
             return db_module.purge_incidents(
                 conn, status_filter=status_filter, dry_run=dry_run,
+                preview_token=preview_token, expected_profile=expected_profile,
             )
         return {"dry_run": dry_run, "count": 0}
 

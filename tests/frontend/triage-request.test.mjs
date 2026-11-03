@@ -44,7 +44,7 @@ test('explicit review scope and repeated tenants survive queue and summary reque
       assert.equal(url.searchParams.get('facet_value'),'5703');
       assert.equal(url.searchParams.get('secondary_facet'),'agent');
       assert.equal(url.searchParams.get('secondary_facet_value'),'node');
-      if(review!=='all'||url.pathname==='/api/alerts')assert.equal(url.searchParams.get('review_status'),review);
+      assert.equal(url.searchParams.get('review_status'),review);
     }
   }
 });

@@ -6,7 +6,7 @@ export function importPage() {
     <div class="import-layout"><section class="panel stack" aria-labelledby="import-heading">
       <h2 id="import-heading" class="section-heading">Sumber alert</h2>
       <div class="segmented" role="group" aria-label="Sumber impor">
-        <button type="button" class="button" data-mode="file" aria-pressed="true">${icon('upload')} Upload file</button>
+        <button type="button" class="button" data-mode="file" aria-pressed="true">${icon('upload')} Unggah file</button>
         <button type="button" class="button" data-mode="paste" aria-pressed="false">Tempel JSON</button>
       </div>
       <form id="import-form" class="stack" novalidate>

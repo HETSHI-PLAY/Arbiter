@@ -3,7 +3,7 @@ import {emptyState, errorState, loadingRows, defangText, esc, icon} from '../../
 import {tenantValues} from '../../state/scope.js';
 import {withParams} from '../../router.js';
 import {createStatsSession} from '../../state/stats.js';
-import {normalizeStatsQuery, statsScopeParams, generateStatsCSV, generateMarkdownSummary, isMaliciousPath, isMaliciousAlert} from './model.js';
+import {drilldownScrollBehavior, normalizeStatsQuery, statsScopeParams, generateStatsCSV, generateMarkdownSummary, isMaliciousPath, isMaliciousAlert} from './model.js';
 import {statsPage, statsResults, renderAppliedFilters} from './render.js';
 
 export function mount(ctx) {
@@ -19,7 +19,9 @@ export function mount(ctx) {
   let activeSpotterMode = 'all';
   const expandedLogIds = new Set();
   let showAllLogs = false;
+  let showAllSecondary = false;
 
+  root.classList.add('stats-page');
   root.innerHTML = statsPage(query);
   const resultsContainer = root.querySelector('#stats-results');
   const batchDialog = root.querySelector('#stats-batch-incident-dialog');
@@ -57,6 +59,7 @@ export function mount(ctx) {
       expandedLogIds,
       showAllLogs,
       selectedSecondaryKeys: [...selectedSecondaryKeys],
+      showAllSecondary,
     });
   }
 
@@ -87,11 +90,12 @@ export function mount(ctx) {
       }
 
       currentData = data;
+      showAllSecondary = false;
       renderView();
       if (query.secondary_facet && query.secondary_facet_value) {
         setTimeout(() => {
           const evidenceEl = root.querySelector('.drilldown-evidence-section');
-          evidenceEl?.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+          if (!signal?.aborted) evidenceEl?.scrollIntoView({behavior: drilldownScrollBehavior(), block: 'nearest'});
         }, 50);
       }
     } catch (err) {
@@ -532,6 +536,11 @@ export function mount(ctx) {
     }
 
     // Interactive drill-down actions
+    if (btn.id === 'btn-toggle-all-secondary' || btn.dataset.statsAction === 'toggle-all-secondary') {
+      showAllSecondary = !showAllSecondary;
+      renderView();
+      return;
+    }
     if (btn.id === 'btn-toggle-all-stats-logs') {
       showAllLogs = !showAllLogs;
       renderView();
@@ -719,6 +728,11 @@ export function mount(ctx) {
       const val = e.target.value?.trim() || '';
       if (val) updateRoute({pattern: val});
     }
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('[data-secondary-key]') && query.secondary_pivot) {
+      e.preventDefault();
+      updateRoute({facet: query.pivot_by, facet_value: e.target.dataset.primaryKey, secondary_facet: query.secondary_pivot, secondary_facet_value: e.target.dataset.secondaryKey});
+      return;
+    }
     if ((e.key === 'Enter' || e.key === ' ') && (e.target.matches('[data-chart-key]') || e.target.matches('[data-drill-key]'))) {
       e.preventDefault();
       const key = e.target.dataset.chartKey || e.target.dataset.drillKey;
@@ -734,6 +748,7 @@ export function mount(ctx) {
   loadData();
 
   return () => {
+    root.classList.remove('stats-page');
     session.dispose();
     activeRequest?.abort();
     batchDialog?.close();

@@ -21,6 +21,7 @@ const paths = {
   clock: '<circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 2"/>',
   chart: '<path d="M2 13h12M4 10V7M8 10V4M12 10V5"/>',
   database: '<ellipse cx="8" cy="4" rx="6" ry="2.5"/><path d="M2 4v8c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5V4"/><path d="M2 8c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5"/>',
+  delete: '<path d="M3 4h10M6 4V2h4v2M5 4v9h6V4"/>',
 };
 export function icon(name) { return `<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.chevron}</svg>`; }
 export function severity(value) {

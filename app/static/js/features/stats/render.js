@@ -15,26 +15,26 @@ export function renderAppliedFilters(query, data = null) {
 
   return `
     ${query.facet && query.facet_value ? `
-      <span class="badge neutral" style="display:inline-flex; align-items:center; gap:6px;">
+      <span class="badge neutral">
         Pivot Utama: <strong>${esc(query.facet)} = ${esc(query.facet_value)}</strong>
         ${primPct !== undefined && primPct !== null ? `
-          <span class="font-medium" style="background:rgba(255,255,255,0.08); padding:1px 6px; border-radius:4px;">
+          <span class="font-medium filter-pct">
             ${(parentTotal || filteredCount || 0).toLocaleString('id-ID')} ${metricLabel} · ${primPct}% dari workspace
           </span>
         ` : (parentTotal ? `<span class="meta font-medium">(${parentTotal.toLocaleString('id-ID')} ${metricLabel} total)</span>` : '')}
-        <button type="button" class="text-button" id="btn-clear-drilldown" title="Hapus filter drill-down utama" style="cursor:pointer;">${icon('close')}</button>
+        <button type="button" class="text-button" id="btn-clear-drilldown" title="Hapus filter drill-down utama">${icon('close')}</button>
       </span>
     ` : ''}
     ${query.secondary_facet && query.secondary_facet_value ? `
-      <span class="badge primary" style="display:inline-flex; align-items:center; gap:6px;">
+      <span class="badge primary">
         Pivot Kedua: <strong>${esc(query.secondary_facet)} = ${esc(query.secondary_facet_value)}</strong>
         ${secPct !== undefined && secPct !== null ? `
-          <span style="background:rgba(255,255,255,0.18); padding:1px 6px; border-radius:4px; font-weight:600;">
+          <span class="filter-pct primary-pct">
             ${(filteredCount || 0).toLocaleString('id-ID')} ${metricLabel} · ${secPct}% dari ${esc(query.facet_value || 'utama')}
             ${totPct ? `(${totPct}% total)` : ''}
           </span>
         ` : ''}
-        <button type="button" class="text-button" id="btn-clear-secondary-drilldown" title="Hapus filter drill-down kedua" style="cursor:pointer;">${icon('close')}</button>
+        <button type="button" class="text-button" id="btn-clear-secondary-drilldown" title="Hapus filter drill-down kedua">${icon('close')}</button>
       </span>
     ` : ''}
   `;
@@ -70,25 +70,25 @@ export function statsPage(query) {
         <h1 id="stats-title">Statistik &amp; Pivot</h1>
         <p class="page-description">Workbench investigasi analitis berbasis agregasi telemetri SQL murni.</p>
       </div>
-      <div class="page-actions stats-page-actions">
+      <div class="page-actions stats-page-actions"><details class="format-menu"><summary class="button">Ekspor ${icon('down')}</summary><div>
         <button class="button" type="button" data-action="export-csv">${icon('report')} CSV</button>
         <button class="button" type="button" data-action="export-svg">${icon('copy')} SVG</button>
         <button class="button" type="button" data-action="copy-summary">${icon('copy')} Salin Ringkasan</button>
-        <span class="stats-action-divider" aria-hidden="true"></span>
-        <a class="button primary" id="btn-open-triage" href="${triageUrl}">${icon('inbox')} Buka di Triage</a>
+        </div></details>
+        <a class="button" id="btn-open-triage" href="${triageUrl}">${icon('inbox')} Buka di Triage</a>
         <button class="button" type="button" data-action="reset-stats">${icon('refresh')} Reset</button>
       </div>
     </header>
 
-    <section class="panel stats-controls stack" style="margin-bottom:16px;">
+    <section class="panel stats-controls stack">
       <div class="stats-control-row">
         <div class="field stats-field-grow">
-          <label for="stats-pivot">Pivot acuan utama</label>
+          <label for="stats-pivot">Kelompokkan berdasarkan</label>
           <select class="select" id="stats-pivot" name="pivot_by">${pivotOpts}</select>
         </div>
         <div class="field stats-field-grow">
-          <label for="stats-secondary-pivot">Pivot kedua (stacked bar)</label>
-          <select class="select" id="stats-secondary-pivot" name="secondary_pivot">${secPivotOpts}</select>
+          <label for="stats-time">Rentang waktu</label>
+          <select class="select" id="stats-time" name="time_preset">${timePresets}</select>
         </div>
         <div class="field stats-field-auto">
           <label for="stats-metric-segmented">Metrik hitungan</label>
@@ -96,27 +96,23 @@ export function statsPage(query) {
             ${METRIC_OPTIONS.map(([val, lbl]) => `<button type="button" class="btn-seg ${query.metric === val ? 'active' : ''}" data-metric="${val}" aria-pressed="${query.metric === val}">${esc(lbl)}</button>`).join('')}
           </div>
         </div>
-        <div class="field stats-field-auto">
-          <label for="stats-chart-segmented">Tipe visualisasi</label>
-          <div class="segmented stats-segmented" id="stats-chart-segmented">
-            ${CHART_OPTIONS.map(([val, lbl]) => `<button type="button" class="btn-seg ${query.chart === val ? 'active' : ''}" data-chart="${val}" aria-pressed="${query.chart === val}">${esc(lbl)}</button>`).join('')}
-          </div>
-        </div>
       </div>
 
-      <div class="stats-control-row" style="margin-top:10px;">
+      <details class="stats-advanced" ${query.secondary_pivot || query.top_n !== 500 ? 'open' : ''}><summary>Pengaturan lanjutan</summary>
+      <div class="stats-control-row">
+        <div class="field stats-field-grow">
+          <label for="stats-secondary-pivot">Pivot kedua (stacked bar)</label>
+          <select class="select" id="stats-secondary-pivot" name="secondary_pivot">${secPivotOpts}</select>
+        </div>
+
         <div class="field stats-field-grow">
           <label for="stats-top-n">Batas kategori teratas</label>
           <select class="select" id="stats-top-n" name="top_n">${topNOpts}</select>
         </div>
         <div class="field stats-field-grow">
-          <label for="stats-time">Rentang waktu</label>
-          <select class="select" id="stats-time" name="time_preset">${timePresets}</select>
-        </div>
-        <div class="field stats-field-grow">
           <label for="stats-preset-select">Preset tersimpan</label>
           <div class="stats-preset-control">
-            <select class="select" id="stats-preset-select" style="flex:1;">
+            <select class="select" id="stats-preset-select">
               <option value="">Pilih preset…</option>
               <option value="preset-top-rules-24h">Top Rules 24 Jam</option>
               <option value="preset-top-ips-7d">Top IP Sumber 7 Hari</option>
@@ -127,7 +123,8 @@ export function statsPage(query) {
         </div>
       </div>
 
-      <div id="stats-custom-time-wrap" style="display:${query.time_preset === 'custom' || (query.time_from && !query.time_preset) ? 'grid' : 'none'}; grid-template-columns:1fr 1fr; gap:12px; margin-top:8px;">
+      </details>
+      <div id="stats-custom-time-wrap" class="stats-custom-time" style="display:${query.time_preset === 'custom' || (query.time_from && !query.time_preset) ? 'grid' : 'none'}">
         <div class="field">
           <label for="stats-time-from">Dari waktu</label>
           <input class="input" type="datetime-local" id="stats-time-from" value="${esc(query.time_from)}">
@@ -138,19 +135,27 @@ export function statsPage(query) {
         </div>
       </div>
 
-      <div id="stats-pattern-wrap" class="field" style="display:${query.pivot_by === 'pattern' ? 'block' : 'none'}; margin-top:8px;">
+      <div id="stats-pattern-wrap" class="field stats-pattern-wrap" style="display:${query.pivot_by === 'pattern' ? 'block' : 'none'}">
         <label for="stats-pattern-input">Kata kunci / pola teks (pencarian literal)</label>
-        <div style="display:flex; gap:8px;">
-          <input class="input" type="text" id="stats-pattern-input" value="${esc(query.pattern)}" placeholder="Contoh: sqlmap, bot, /admin, 403..." maxlength="120" style="max-width:400px;">
+        <div class="stats-pattern-row">
+          <input class="input" type="text" id="stats-pattern-input" value="${esc(query.pattern)}" placeholder="Contoh: sqlmap, bot, /admin, 403..." maxlength="120">
           <button class="button" type="button" id="btn-apply-pattern">Terapkan Pola</button>
         </div>
       </div>
 
-      <div id="stats-applied-filters" class="applied-filters" style="margin-top:12px; display:${(query.facet && query.facet_value) || (query.secondary_facet && query.secondary_facet_value) ? 'flex' : 'none'}; gap:8px; flex-wrap:wrap; align-items:center;">
+      <div id="stats-applied-filters" class="applied-filters" style="display:${(query.facet && query.facet_value) || (query.secondary_facet && query.secondary_facet_value) ? 'flex' : 'none'}">
         ${renderAppliedFilters(query, null)}
       </div>
     </section>
 
+    <div class="stats-chart-toolbar">
+        <div class="field stats-field-auto">
+          <label for="stats-chart-segmented">Tipe visualisasi</label>
+          <div class="segmented stats-segmented" id="stats-chart-segmented">
+            ${CHART_OPTIONS.map(([val, lbl]) => `<button type="button" class="btn-seg ${query.chart === val ? 'active' : ''}" data-chart="${val}" aria-pressed="${query.chart === val}">${esc(lbl)}</button>`).join('')}
+          </div>
+        </div>
+    </div>
     <div id="stats-workspace" class="stack">
       <div id="stats-results"></div>
     </div>
@@ -163,9 +168,9 @@ export function statsPage(query) {
       <form id="stats-batch-incident-form" class="stack">
         <p class="muted"><span id="stats-batch-incident-count">0</span> alert terpilih dari hasil drill-down akan ditautkan ke kasus insiden di bawah ini.</p>
         <div class="field">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
-            <label for="stats-batch-incident-select" style="margin-bottom:0;">Pilih Insiden Sasaran</label>
-            <button type="button" class="text-button meta" id="btn-reload-batch-incidents" style="cursor:pointer;" title="Muat ulang daftar insiden">${icon('refresh')} Muat ulang</button>
+          <div class="split" style="margin-bottom:4px">
+            <label for="stats-batch-incident-select" style="margin-bottom:0">Pilih Insiden Sasaran</label>
+            <button type="button" class="text-button meta" id="btn-reload-batch-incidents" title="Muat ulang daftar insiden">${icon('refresh')} Muat ulang</button>
           </div>
           <select class="select" id="stats-batch-incident-select" name="group_id" required>
             <option value="">Memuat daftar insiden…</option>
@@ -181,10 +186,13 @@ export function statsPage(query) {
   `;
 }
 
-export function statsResults(data, query, {drilldownAlerts = null, selectedIds = [], expandedLogIds = new Set(), showAllLogs = false, selectedSecondaryKeys = []} = {}) {
+export function statsResults(data, query, {drilldownAlerts = null, selectedIds = [], expandedLogIds = new Set(), showAllLogs = false, selectedSecondaryKeys = [], showAllSecondary = false} = {}) {
   const total = Number(data.total) || 0;
   const metricLabel = data.metric === 'events' ? 'event' : 'alert';
   const items = distributionPercentages(data.items || [], 0, total);
+  const topCount = items[0]?.count || 0;
+  const topItems = items.filter(it => it.count === topCount && topCount > 0);
+  const isTie = topItems.length > 1;
 
   let chartHtml = '';
   if (query.chart === 'bar') {
@@ -207,7 +215,7 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
     const triageUrl = triageRouteFromStats(query, {facet: data.pivot_by, facet_value: item.key});
     const subDist = data.secondary_distribution?.[item.key] || [];
     const subBreakdown = subDist.length ? `
-      <div class="meta" style="margin-top:4px; font-size:11px;">
+      <div class="meta sub-breakdown">
         ${subDist.slice(0, 3).map(s => `${esc(s.key)} (${s.count})`).join(' · ')}
         ${subDist.length > 3 ? ` · +${subDist.length - 3} lainnya` : ''}
       </div>
@@ -223,7 +231,7 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
         <td class="numeric">
           ${item.displayPercentage}%
           ${query.facet && query.facet_value && data.primary_percentage_of_total !== undefined ? `
-            <div class="meta font-medium" style="font-size:11px; color:var(--primary, #3b82f6);">(${data.primary_percentage_of_total}% workspace)</div>
+            <div class="meta font-medium sub-breakdown-pct">(${data.primary_percentage_of_total}% workspace)</div>
           ` : ''}
         </td>
         <td class="actions-col" style="text-align:right;">
@@ -239,9 +247,18 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
     const secLabel = data.secondary_pivot ? (PIVOT_OPTIONS.find(([k]) => k === data.secondary_pivot)?.[1] || data.secondary_pivot) : 'Pivot Kedua';
     const activeSubCat = query.secondary_facet_value;
 
+    let sortedBreakdown = [...(data.secondary_breakdown || [])].sort((a, b) => {
+      const cDiff = (b.count || 0) - (a.count || 0);
+      if (cDiff !== 0) return cDiff;
+      return String(a.key || '').localeCompare(String(b.key || ''));
+    });
+
+    const hasMoreThan10 = sortedBreakdown.length > 10;
+    const isShowingAll = Boolean(showAllSecondary);
+
     let visibleBreakdown = activeSubCat
-      ? data.secondary_breakdown.filter(sb => sb.key === activeSubCat)
-      : data.secondary_breakdown;
+      ? sortedBreakdown.filter(sb => sb.key === activeSubCat)
+      : (hasMoreThan10 && !isShowingAll ? sortedBreakdown.slice(0, 10) : sortedBreakdown);
 
     if (activeSubCat && visibleBreakdown.length === 0) {
       visibleBreakdown = [{
@@ -264,6 +281,9 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
       const isChecked = selectedSecSet.has(sb.key);
       const isMalicious = isMaliciousPath(sb.key);
       const keyEsc = esc(sb.key);
+      const pct = (sb.percentage !== undefined && sb.percentage !== null)
+        ? sb.percentage
+        : Math.round(((sb.count || 0) / primaryCategoryTotal) * 1000) / 10;
       return `
         <tr class="${isFiltered ? 'is-selected' : ''} ${isMalicious ? 'has-malicious-match' : ''}">
           <td style="width:40px;">
@@ -271,10 +291,10 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
           </td>
           <td class="mono font-medium">
             ${keyEsc}
-            ${isMalicious ? `<span class="badge danger" style="font-size:10px; margin-left:6px; padding:1px 5px;" title="Terdeteksi oleh Malicious Spotter">Mencurigakan</span>` : ''}
+            ${isMalicious ? `<span class="badge danger malicious-badge" title="Terdeteksi oleh Malicious Spotter">Mencurigakan</span>` : ''}
           </td>
           <td class="numeric">${sb.count.toLocaleString('id-ID')}</td>
-          <td class="numeric">${sb.percentage}%</td>
+          <td class="numeric">${pct}%</td>
           <td class="actions-col" style="text-align:right; white-space:nowrap;">
             <button type="button" class="button text-button ${isFiltered ? 'primary' : ''}"
                     data-secondary-drill-key="${keyEsc}"
@@ -294,15 +314,15 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
     }).join('');
 
     secondaryBreakdownSection = `
-      <section class="panel table-container" style="margin-top:16px;">
-        <div class="section-heading" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+      <section class="panel table-container secondary-breakdown-section">
+        <div class="section-heading stats-section-heading">
           <div>
             <h3>Rincian ${esc(secLabel)} (dalam "${esc(query.facet_value)}")</h3>
             <span class="meta">
               ${activeSubCat ? `
                 Menyaring 1 sub-kategori (dari total ${data.secondary_breakdown.length} dalam "${esc(query.facet_value)}")
                 ${data.parent_total ? ` · Basis: ${data.parent_total.toLocaleString('id-ID')} ${metricLabel}` : ''}
-                ${data.secondary_percentage_of_parent !== undefined && data.secondary_percentage_of_parent !== null ? ` · Proporsi: <strong style="color:var(--primary, #3b82f6);">${data.secondary_percentage_of_parent}%</strong> (${(data.total || 0).toLocaleString('id-ID')} ${metricLabel})` : ''}
+                ${data.secondary_percentage_of_parent !== undefined && data.secondary_percentage_of_parent !== null ? ` · Proporsi: <strong class="sub-breakdown-pct">${data.secondary_percentage_of_parent}%</strong> (${(data.total || 0).toLocaleString('id-ID')} ${metricLabel})` : ''}
               ` : `
                 ${data.secondary_breakdown.length} sub-kategori ditemukan
                 ${data.parent_total ? ` · Basis: ${data.parent_total.toLocaleString('id-ID')} ${metricLabel}` : ''}
@@ -310,7 +330,7 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
               `}
             </span>
           </div>
-          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <div class="stats-section-actions">
             ${activeSubCat ? `
               <button type="button" class="button primary" id="btn-clear-secondary-drilldown">
                 ${icon('refresh')} Tampilkan Semua Sub-kategori (${data.secondary_breakdown.length})
@@ -326,7 +346,7 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
           </div>
         </div>
 
-        <div id="secondary-selection-toolbar" class="selection-toolbar" style="display:${selectedSecondaryKeys.length ? 'flex' : 'none'}; margin-bottom:12px;">
+        <div id="secondary-selection-toolbar" class="selection-toolbar" style="display:${selectedSecondaryKeys.length ? 'flex' : 'none'}">
           <strong>${selectedSecondaryKeys.length} sub-kategori dipilih (${totalSelectedAlerts.toLocaleString('id-ID')} ${metricLabel} · ${selectedPercentage}%)</strong>
           <button class="button primary" type="button" data-action="batch-secondary-create-incident">${icon('plus')} Buat insiden</button>
           <button class="button" type="button" data-action="batch-secondary-add-incident">${icon('cases')} Masukkan ke insiden</button>
@@ -334,7 +354,7 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
           <button class="button icon-button" type="button" data-action="clear-secondary-selection" aria-label="Batalkan pilihan sub-kategori">${icon('close')}</button>
         </div>
 
-        <div class="table-region">
+        <div class="table-region" tabindex="0" role="region" aria-label="Tabel analisis; gulir horizontal untuk kolom lainnya">
           <table class="data-table">
             <thead>
               <tr>
@@ -352,6 +372,13 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
             </tbody>
           </table>
         </div>
+        ${hasMoreThan10 && !activeSubCat ? `
+          <div class="secondary-toggle-row" style="margin-top:12px; display:flex; justify-content:center;">
+            <button type="button" class="button" id="btn-toggle-all-secondary" data-stats-action="toggle-all-secondary" aria-expanded="${isShowingAll}">
+              ${icon(isShowingAll ? 'down' : 'chevron')} <span id="toggle-all-secondary-label">${isShowingAll ? 'Tampilkan lebih sedikit' : 'Tampilkan semua'}</span>
+            </button>
+          </div>
+        ` : ''}
       </section>
     `;
   }
@@ -377,8 +404,8 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
           <td>
             <span class="font-medium">${esc(a.description || 'Alert')}</span>
             <span class="meta mono">(${esc(a.rule_id || '—')})</span>
-            ${isMal ? `<span class="badge danger" style="font-size:10px; margin-left:6px; padding:1px 5px;" title="Terindikasi Malicious">Mencurigakan</span>` : ''}
-            <button type="button" class="text-button meta" data-stats-action="toggle-log" data-alert-id="${a.id}" style="margin-left:6px; cursor:pointer;" title="Buka/tutup full log">
+            ${isMal ? `<span class="badge danger malicious-badge" title="Terindikasi Malicious">Mencurigakan</span>` : ''}
+            <button type="button" class="text-button meta log-toggle-btn" data-stats-action="toggle-log" data-alert-id="${a.id}" aria-expanded="${isExp}" title="Buka/tutup full log">
               [${isExp ? 'Tutup Log' : 'Log'}]
             </button>
           </td>
@@ -395,7 +422,7 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
             <div class="queue-log-box stack">
               <div class="split queue-log-head">
                 <span class="meta mono">Log Alert #${esc(a.alert_id || a.id)} · Host: ${esc(a.agent_name || '—')} · Rule ${esc(a.rule_id || '—')}</span>
-                <div style="display:flex; gap:6px;">
+                <div class="stats-log-actions">
                   <button class="button text-button meta" type="button" data-stats-action="copy-single-log" data-alert-id="${a.id}">${icon('copy')} Salin</button>
                   <button class="button text-button meta" type="button" data-stats-action="copy-single-redacted" data-alert-id="${a.id}">Tersamarkan</button>
                   <button class="button text-button meta" type="button" data-stats-action="copy-single-defanged" data-alert-id="${a.id}">Defang</button>
@@ -411,19 +438,19 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
     }).join('');
 
     drilldownSection = `
-      <section class="panel stack drilldown-evidence-section" style="margin-top:24px;">
-        <div class="section-heading" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:12px;">
+      <section class="panel stack drilldown-evidence-section">
+        <div class="section-heading stats-section-heading">
           <div>
             <h2>Bukti Alert Hasil Drill-down</h2>
             <span class="meta">
               ${drilldownAlerts.length} alert ditampilkan (${esc(query.facet)} = "${esc(query.facet_value)}"${query.secondary_facet_value ? ` · ${esc(query.secondary_facet)} = "${esc(query.secondary_facet_value)}"` : ''})
               ${data && data.secondary_percentage_of_parent !== undefined && data.secondary_percentage_of_parent !== null ? `
-                — <strong style="color:var(--primary, #3b82f6);">${data.secondary_percentage_of_parent}%</strong> dari "${esc(query.facet_value)}"
+                — <strong class="sub-breakdown-pct">${data.secondary_percentage_of_parent}%</strong> dari "${esc(query.facet_value)}"
                 ${data.secondary_percentage_of_total ? `(<strong>${data.secondary_percentage_of_total}%</strong> total workspace)` : ''}
               ` : ''}
             </span>
           </div>
-          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <div class="stats-section-actions">
             <button type="button" class="button" id="btn-evidence-malicious-spotter" title="Pilih otomatis semua alert individual yang terindikasi berbahaya">
               ${icon('alert')} Malicious Spotter
             </button>
@@ -447,7 +474,7 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
           <button class="button icon-button" type="button" data-stats-action="clear-selection" aria-label="Batalkan pilihan">${icon('close')}</button>
         </div>
 
-        <div class="table-region">
+        <div class="table-region" tabindex="0" role="region" aria-label="Tabel analisis; gulir horizontal untuk kolom lainnya">
           <table class="data-table">
             <thead>
               <tr>
@@ -468,7 +495,7 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
     `;
   } else if (query.facet && query.facet_value) {
     drilldownSection = `
-      <section class="panel stack drilldown-evidence-section" style="margin-top:24px;">
+      <section class="panel stack drilldown-evidence-section">
         <div class="section-heading">
           <div>
             <h2>Bukti Alert Hasil Drill-down</h2>
@@ -481,40 +508,45 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
   }
 
   return `
-    <div class="metric-strip" style="margin-bottom:16px;">
+    <div class="metric-strip">
       <div>
         <dt>Total ${metricLabel}</dt>
         <dd>
-          ${total.toLocaleString('id-ID')}
-          ${data.workspace_total && data.workspace_total !== total ? `
-            <span class="meta" style="font-size:13px; font-weight:normal;"> (${data.primary_percentage_of_total !== undefined ? `${data.primary_percentage_of_total}% dari ` : ''}${data.workspace_total.toLocaleString('id-ID')} total)</span>
+        ${total.toLocaleString('id-ID')}
+        ${data.workspace_total && data.workspace_total !== total ? `
+          <span class="meta metric-total-note"> (${data.primary_percentage_of_total !== undefined ? `${data.primary_percentage_of_total}% dari ` : ''}${data.workspace_total.toLocaleString('id-ID')} total)</span>
           ` : ''}
         </dd>
       </div>
       <div>
         <dt>Total Kategori Unik</dt>
-        <dd>${items.length} <span class="meta" style="font-size:14px;">kategori</span></dd>
+        <dd>${items.length} <span class="meta metric-unit">kategori</span></dd>
       </div>
       <div>
-        <dt>Kategori Terbanyak</dt>
-        <dd>${items[0] ? esc(items[0].key) : '—'} <span class="meta" style="font-size:14px;">(${items[0]?.count?.toLocaleString('id-ID') || 0} ${metricLabel})</span></dd>
+        <dt>Kategori Terbanyak ${isTie ? `<span class="meta font-medium">(${topItems.length} kategori seri)</span>` : ''}</dt>
+        <dd class="metric-category">
+          <strong>${topCount.toLocaleString('id-ID')} <span class="meta">${metricLabel}${isTie ? ' masing-masing' : ''}</span></strong>
+          <span class="metric-category-name" title="${topItems.map(it => esc(it.key)).join(', ')}">
+            ${isTie ? topItems.map(it => `<span class="badge neutral">${esc(it.key)}</span>`).join(' ') : (items[0] ? esc(items[0].key) : '—')}
+          </span>
+        </dd>
       </div>
       ${query.facet && query.facet_value && data.primary_percentage_of_total !== undefined && data.primary_percentage_of_total !== null && !query.secondary_facet_value ? `
         <div>
           <dt>Proporsi Pivot Utama</dt>
-          <dd style="color:var(--primary, #3b82f6);">${data.primary_percentage_of_total}% <span class="meta" style="font-size:14px;">(${total.toLocaleString('id-ID')} dari ${data.workspace_total?.toLocaleString('id-ID') || 0} ${metricLabel})</span></dd>
+          <dd class="metric-proportion">${data.primary_percentage_of_total}% <span class="meta metric-unit">(${total.toLocaleString('id-ID')} dari ${data.workspace_total?.toLocaleString('id-ID') || 0} ${metricLabel})</span></dd>
         </div>
       ` : ''}
       ${query.secondary_facet_value && data.secondary_percentage_of_parent !== undefined && data.secondary_percentage_of_parent !== null ? `
         <div>
           <dt>Proporsi Pivot Kedua</dt>
-          <dd style="color:var(--primary, #3b82f6);">${data.secondary_percentage_of_parent}% <span class="meta" style="font-size:14px;">(${total.toLocaleString('id-ID')} dari ${data.parent_total?.toLocaleString('id-ID') || 0} ${metricLabel})</span></dd>
+          <dd class="metric-proportion">${data.secondary_percentage_of_parent}% <span class="meta metric-unit">(${total.toLocaleString('id-ID')} dari ${data.parent_total?.toLocaleString('id-ID') || 0} ${metricLabel})</span></dd>
         </div>
       ` : ''}
     </div>
 
     ${query.chart !== 'table' ? `
-      <section class="panel chart-container" id="stats-chart-wrapper" style="margin-bottom:20px; overflow-x:auto;">
+      <section class="panel chart-container" id="stats-chart-wrapper" tabindex="0" aria-label="Grafik statistik; gulir horizontal pada layar kecil">
         ${chartHtml}
       </section>
     ` : ''}
@@ -527,7 +559,7 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
           ${query.facet && query.facet_value && data.primary_percentage_of_total !== undefined ? ` · <strong>${data.primary_percentage_of_total}%</strong> dari total workspace (${data.workspace_total?.toLocaleString('id-ID')} ${metricLabel})` : ''}
         </span>
       </div>
-      <div class="table-region">
+      <div class="table-region" tabindex="0" role="region" aria-label="Tabel analisis; gulir horizontal untuk kolom lainnya">
         <table class="data-table">
           <thead>
             <tr>

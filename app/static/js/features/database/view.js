@@ -1,16 +1,21 @@
 import {json, apiURL} from '../../api/client.js';
 import {esc, icon, emptyState, errorState, loadingRows, formatTime} from '../../ui/primitives.js';
-import {summarizeTelemetryRange} from './model.js';
+import {summarizeTelemetryRange, databaseIdentity} from './model.js';
 
 export async function mount(ctx) {
   const {root, route, signal, notify, navigate} = ctx;
   let statusData = null, testResults = {};
   let uriDraft = '';
+  let switchUnverified = false;
+  let previews = {}, previewVersion = 0;
+  const invalidatePreviews = () => { previews = {}; previewVersion++; };
+  root.addEventListener('change', invalidatePreviews, {signal});
   ctx.setGuard?.(() => !uriDraft.trim());
-  root.addEventListener('input', () => { uriDraft = root.querySelector('#remote-url-input')?.value || ''; }, {signal});
+  root.addEventListener('input', () => { uriDraft = root.querySelector('#remote-url-input')?.value || ''; invalidatePreviews(); }, {signal});
   const currentTenant = route.params.get('tenant') || 'all';
 
   function render() {
+    invalidatePreviews();
     if (!statusData) {
       root.innerHTML = loadingRows(4);
       return;
@@ -166,7 +171,7 @@ export async function mount(ctx) {
 
           <form id="purge-incidents-form" class="stack">
             <h3>Pembersihan Kasus Insiden</h3>
-            <p class="muted">Menghapus berkas kasus insiden beserta tautan buktinya (alert mentah tidak terhapus).</p>
+            <p class="muted">GLOBAL — semua tenant; scope tenant workspace tidak membatasi operasi ini. Menghapus berkas kasus insiden beserta tautan buktinya (alert mentah tidak terhapus).</p>
             <label class="field">
               <span>Kriteria Kasus</span>
               <select class="select" id="purge-incidents-filter" name="status">
@@ -196,6 +201,11 @@ export async function mount(ctx) {
   async function loadStatus() {
     try {
       statusData = await json(apiURL('/api/database/status'), {signal});
+      if (switchUnverified) {
+        if (!databaseIdentity(statusData.active_profile)) throw new Error('Identitas database belum terverifikasi.');
+        await ctx.databaseChanged?.(statusData);
+        switchUnverified = false;
+      }
       render();
       return true;
     } catch (err) {
@@ -244,10 +254,15 @@ export async function mount(ctx) {
 
     if (action === 'switch-profile') {
       const pid = btn.dataset.profile;
+      const expected = databaseIdentity(statusData?.profiles?.find(p => p.id === pid));
+      if (!expected) { notify('Identitas target belum tersedia. Perbarui status terlebih dahulu.', 'error'); return; }
       if (uriDraft.trim() && !confirm('Ada URI yang belum disimpan. Buang perubahan dan beralih database?')) return;
       if (!confirm(`Beralih koneksi ke database "${pid}"? Data aktif workspace akan menyesuaikan database yang dipilih.`)) return;
       btn.disabled = true;
       try {
+        invalidatePreviews();
+        switchUnverified = true;
+        await ctx.databaseChanged?.(null);
         await json(apiURL('/api/database/switch'), {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
@@ -255,10 +270,19 @@ export async function mount(ctx) {
           signal,
         });
         uriDraft = '';
+        const verified = await json(apiURL('/api/database/status'), {signal});
+        if (databaseIdentity(verified.active_profile) !== expected) throw new Error('Target database tidak cocok dengan readback. Status pergantian belum terverifikasi.');
+        statusData = verified;
+        await ctx.databaseChanged?.(verified);
+        switchUnverified = false;
+        render();
         notify(`Berhasil beralih ke database ${pid}.`, 'success');
-        await loadStatus();
       } catch (err) {
-        if (err.name !== 'AbortError') notify(`Gagal beralih database: ${err.message}`, 'error');
+        statusData = null;
+        if (err.name !== 'AbortError') {
+          root.innerHTML = `${errorState('Pergantian database belum terverifikasi. Perbarui status untuk memeriksa database aktif.')}<button class="button" data-action="refresh-status" type="button">Perbarui Status</button>`;
+          notify(`Gagal beralih database: ${err.message}`, 'error');
+        }
       } finally {
         btn.disabled = false;
       }
@@ -306,42 +330,7 @@ export async function mount(ctx) {
         older_than_days = Number(preset) || 30;
       }
 
-      if (!isDry) {
-        if (!confirm('PERINGATAN: Tindakan ini akan menghapus data alert secara permanen dari database. Lanjutkan?')) return;
-      }
-
-      btn.disabled = true;
-      if (resultSlot) resultSlot.textContent = isDry ? 'Menghitung data terdampak…' : 'Menghapus data…';
-
-      try {
-        const res = await json(apiURL('/api/database/purge-alerts'), {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            older_than_days,
-            time_from: time_from ? new Date(time_from).toISOString() : '',
-            time_to: time_to ? new Date(time_to).toISOString() : '',
-            tenant,
-            dry_run: isDry,
-          }),
-          signal,
-        });
-
-        if (isDry) {
-          if (resultSlot) resultSlot.innerHTML = `<span class="inline-status info">${icon('check')} Pratinjau: <strong>${Number(res.count || 0).toLocaleString('id-ID')} alert</strong> cocok dengan filter dan akan terhapus jika dieksekusi.</span>`;
-        } else {
-          notify(`${Number(res.deleted || 0).toLocaleString('id-ID')} alert berhasil dihapus.`, 'success');
-          if (resultSlot) resultSlot.innerHTML = `<span class="inline-status success">${icon('check')} Selesai: <strong>${Number(res.deleted || 0).toLocaleString('id-ID')} alert</strong> telah dihapus.</span>`;
-          await loadStatus();
-        }
-      } catch (err) {
-        if (err.name !== 'AbortError') {
-          if (resultSlot) resultSlot.innerHTML = `<span class="inline-status error">${icon('close')} ${esc(err.message)}</span>`;
-          notify(err.message, 'error');
-        }
-      } finally {
-        btn.disabled = false;
-      }
+      await maintain('alerts', {older_than_days, time_from, time_to, tenant}, isDry, btn, resultSlot);
       return;
     }
 
@@ -350,39 +339,51 @@ export async function mount(ctx) {
       const status = root.querySelector('#purge-incidents-filter')?.value || 'closed_only';
       const resultSlot = root.querySelector('#purge-incidents-result');
 
-      if (!isDry) {
-        if (!confirm('PERINGATAN: Kasus insiden yang dipilih akan dihapus permanen. Alert asli tidak akan terhapus. Lanjutkan?')) return;
-      }
-
-      btn.disabled = true;
-      if (resultSlot) resultSlot.textContent = isDry ? 'Menghitung kasus terdampak…' : 'Menghapus kasus…';
-
-      try {
-        const res = await json(apiURL('/api/database/purge-incidents'), {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({status, dry_run: isDry}),
-          signal,
-        });
-
-        if (isDry) {
-          if (resultSlot) resultSlot.innerHTML = `<span class="inline-status info">${icon('check')} Pratinjau: <strong>${Number(res.count || 0).toLocaleString('id-ID')} kasus insiden</strong> cocok dengan kriteria dan akan terhapus jika dieksekusi.</span>`;
-        } else {
-          notify(`${Number(res.deleted || 0).toLocaleString('id-ID')} kasus insiden berhasil dibersihkan.`, 'success');
-          if (resultSlot) resultSlot.innerHTML = `<span class="inline-status success">${icon('check')} Selesai: <strong>${Number(res.deleted || 0).toLocaleString('id-ID')} kasus</strong> telah dibersihkan.</span>`;
-          await loadStatus();
-        }
-      } catch (err) {
-        if (err.name !== 'AbortError') {
-          if (resultSlot) resultSlot.innerHTML = `<span class="inline-status error">${icon('close')} ${esc(err.message)}</span>`;
-          notify(err.message, 'error');
-        }
-      } finally {
-        btn.disabled = false;
-      }
+      await maintain('incidents', {status}, isDry, btn, resultSlot);
       return;
     }
   }, {signal});
+
+  async function maintain(kind, filters, dry, btn, slot) {
+    const key = JSON.stringify(filters), identity = databaseIdentity(statusData?.active_profile);
+    const preview = previews[kind], version = previewVersion;
+    btn.disabled = true;
+    try {
+      if (!identity) throw new Error('Identitas database belum terverifikasi. Perbarui status.');
+      if (!dry && (!preview || preview.key !== key || preview.identity !== identity || Date.now() - preview.at > 60000)) throw new Error('Pratinjau baru diperlukan untuk database dan filter yang sama (berlaku 60 detik).');
+      const current = await json(apiURL('/api/database/status'), {signal});
+      if (databaseIdentity(current.active_profile) !== identity) throw new Error('Database berubah. Perbarui status dan buat pratinjau baru.');
+      if (!dry && current.active_profile.mode !== 'read_write') throw new Error('Database Read-Only: pembersihan dinonaktifkan.');
+      const payload = dry ? {...filters} : {...preview.payload};
+      if (!dry && preview.preview_token) payload.preview_token = preview.preview_token;
+      if (dry && kind === 'alerts') {
+        // Freeze relative age so preview and execution use exactly the same cutoff.
+        payload.time_from = filters.time_from ? new Date(filters.time_from).toISOString() : '';
+        payload.time_to = filters.time_to ? new Date(filters.time_to).toISOString() : filters.older_than_days ? new Date(Date.now() - filters.older_than_days * 86400000).toISOString() : '';
+        payload.older_than_days = null;
+      }
+      if (version !== previewVersion) throw new Error('Filter berubah selama permintaan. Buat pratinjau baru.');
+      if (!dry && !confirm(`Hapus permanen dari database ${current.active_profile.id} (${current.active_profile.masked_url})? Pratinjau: ${preview.count} ${kind}. Filter: ${JSON.stringify(payload)}. ${kind === 'incidents' ? 'GLOBAL: semua tenant; scope workspace diabaikan. Alert mentah tidak dihapus.' : `Tenant: ${filters.tenant}.`} Jumlah dapat berubah setelah pratinjau.`)) return;
+      if (!dry && (previews[kind] !== preview || Date.now() - preview.at > 60000)) throw new Error('Pratinjau kedaluwarsa atau sudah digunakan. Buat pratinjau baru.');
+      delete previews[kind];
+      const res = await json(apiURL(`/api/database/purge-${kind}`), {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({...payload, dry_run:dry}), signal});
+      if (dry) {
+        const after = await json(apiURL('/api/database/status'), {signal});
+        if (databaseIdentity(after.active_profile) !== identity || version !== previewVersion || res.dry_run !== true || !Number.isSafeInteger(res.count) || res.count < 0) throw new Error('Pratinjau tidak valid atau database/filter berubah. Ulangi pratinjau.');
+        previews[kind] = {key, identity, payload, count:res.count, at:Date.now(), preview_token: res.preview_token};
+        if (slot) slot.textContent = `Pratinjau: ${res.count} ${kind}; database ${current.active_profile.id}; ${kind === 'incidents' ? 'GLOBAL — semua tenant (scope workspace diabaikan)' : `tenant ${filters.tenant}`}; filter ${JSON.stringify(payload)}. Berlaku 60 detik; bukan snapshot atomik.`;
+      } else {
+        if (res.dry_run !== false || !Number.isSafeInteger(res.deleted) || res.deleted < 0) throw new Error('Hasil penghapusan belum terverifikasi. Jangan ulangi tanpa pratinjau baru.');
+        const after = await json(apiURL('/api/database/status'), {signal});
+        if (databaseIdentity(after.active_profile) !== identity) throw new Error('Database berubah setelah penghapusan. Hasil belum terverifikasi; jangan ulangi tanpa pratinjau baru.');
+        statusData = after;render();
+        notify(`${res.deleted} ${kind} dihapus menurut respons server.`, 'success');
+      }
+    } catch (err) {
+      delete previews[kind];
+      if (err.name !== 'AbortError') { if (slot) slot.textContent = err.message; notify(err.message, 'error'); }
+    } finally { btn.disabled = false; }
+  }
 
   await loadStatus();
   return () => {};

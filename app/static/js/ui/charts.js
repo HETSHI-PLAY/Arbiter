@@ -53,11 +53,11 @@ export function renderBarChart({
     return `<div class="chart-empty"><p class="muted">Tidak ada data untuk ditampilkan pada grafik ini.</p></div>`;
   }
 
-  const rowHeight = 38;
-  const height = allRows.length * rowHeight + 30;
-  const width = 640;
-  const labelWidth = 180;
-  const barMaxWidth = width - labelWidth - 110;
+  const rowHeight = 44;
+  const height = allRows.length * rowHeight + 32;
+  const width = 960;
+  const labelWidth = 350;
+  const barMaxWidth = width - labelWidth - 120;
 
   // Gather unique secondary keys for global legend
   let secondaryLegend = '';
@@ -68,7 +68,7 @@ export function renderBarChart({
         if (s.key) allSecKeys.add(s.key);
       }
     }
-    const secList = [...allSecKeys].slice(0, 8);
+    const secList = [...allSecKeys];
     if (secList.length > 0) {
       secondaryLegend = `
         <div class="chart-secondary-legend" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; font-size:12px;">
@@ -100,8 +100,8 @@ export function renderBarChart({
         const subColor = getColor(sub.key, sIdx);
         const subPct = Math.round((sub.count / (r.count || 1)) * 100);
         const rx = `
-          <rect x="${curX}" y="${y + 4}" width="${segW}" height="18" fill="${subColor}" opacity="0.9"
-                data-primary-key="${keyEsc}" data-secondary-key="${esc(sub.key)}" class="stacked-bar-seg" style="cursor:pointer;">
+          <rect x="${curX}" y="${y + 4}" width="${segW}" height="22" fill="${subColor}" opacity="0.9"
+                data-primary-key="${keyEsc}" data-secondary-key="${esc(sub.key)}" tabindex="0" role="button" aria-label="${keyEsc} → ${esc(sub.key)}: ${sub.count} ${metricLabel}" class="stacked-bar-seg" style="cursor:pointer;">
             <title>${keyEsc} → ${esc(sub.key)}: ${sub.count} ${metricLabel} (${subPct}% dari kategori ini) — Klik untuk saring</title>
           </rect>
         `;
@@ -110,15 +110,15 @@ export function renderBarChart({
       }).join('');
     } else {
       const color = getColor(r.key, i);
-      rects = `<rect x="${labelWidth}" y="${y + 4}" width="${barW}" height="18" rx="2" fill="${color}" opacity="0.85" />`;
+      rects = `<rect x="${labelWidth}" y="${y + 4}" width="${barW}" height="22" rx="3" fill="${color}" opacity="0.85" />`;
     }
 
     return `
       <g class="chart-bar-row" data-chart-key="${keyEsc}" tabindex="0" role="button" aria-label="${keyEsc}: ${r.count} ${metricLabel} (${pct}%)">
         <title>${keyEsc}: ${r.count} ${metricLabel} (${pct}%)</title>
-        <text x="${labelWidth - 10}" y="${y + 16}" text-anchor="end" fill="var(--text)" font-size="12" font-family="var(--font)">${keyEsc.length > 22 ? esc(keyEsc.slice(0, 20) + '…') : keyEsc}</text>
+        <text x="${labelWidth - 12}" y="${y + 19}" text-anchor="end" fill="var(--text)" font-size="13" font-family="var(--font)">${keyEsc.length > 46 ? esc(keyEsc.slice(0, 44) + '…') : keyEsc}</text>
         ${rects}
-        <text x="${labelWidth + barW + 8}" y="${y + 17}" fill="var(--muted)" font-size="11" font-family="var(--mono)">${r.count} ${metricLabel} (${pct}%)</text>
+        <text x="${labelWidth + barW + 10}" y="${y + 20}" fill="var(--muted)" font-size="12" font-family="var(--mono)">${r.count} ${metricLabel} (${pct}%)</text>
       </g>
     `;
   }).join('');
@@ -141,11 +141,11 @@ export function renderDonutChart({items = [], otherCount = 0, otherPercentage = 
     return `<div class="chart-empty"><p class="muted">Tidak ada data untuk grafik donut.</p></div>`;
   }
 
-  const size = 300;
+  const size = 380;
   const cx = size / 2;
   const cy = size / 2;
-  const rOuter = 110;
-  const rInner = 68;
+  const rOuter = 145;
+  const rInner = 90;
 
   let currentAngle = -Math.PI / 2;
   const paths = allRows.map((row, i) => {
@@ -213,12 +213,12 @@ export function renderLineChart({timeSeries = [], topKeys = [], metric = 'alerts
     return `<div class="chart-empty"><p class="muted">Tidak ada data rentang waktu untuk grafik tren.</p></div>`;
   }
 
-  const width = 640;
-  const height = 260;
-  const padLeft = 45;
-  const padRight = 20;
-  const padTop = 20;
-  const padBottom = 40;
+  const width = 840;
+  const height = 320;
+  const padLeft = 55;
+  const padRight = 30;
+  const padTop = 25;
+  const padBottom = 45;
 
   const chartW = width - padLeft - padRight;
   const chartH = height - padTop - padBottom;
