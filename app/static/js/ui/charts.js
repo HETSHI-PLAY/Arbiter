@@ -1,4 +1,4 @@
-import {esc} from './primitives.js';
+import {esc, icon} from './primitives.js';
 
 const SIGNAL_COLORS = {
   critical: 'var(--critical)',
@@ -46,6 +46,7 @@ export function renderBarChart({
   metric = 'alerts',
   secondaryDistribution = null,
   secondaryLabel = '',
+  showAllSecondary = false,
 } = {}) {
   const metricLabel = metric === 'events' ? 'event' : 'alert';
   const allRows = [...items];
@@ -59,26 +60,50 @@ export function renderBarChart({
   const labelWidth = 350;
   const barMaxWidth = width - labelWidth - 120;
 
-  // Gather unique secondary keys for global legend
+  // Gather and sort unique secondary keys for global legend by aggregate count desc, key asc
   let secondaryLegend = '';
-  const allSecKeys = new Set();
   if (secondaryDistribution) {
+    const secKeyCounts = new Map();
     for (const subList of Object.values(secondaryDistribution)) {
       for (const s of (subList || [])) {
-        if (s.key) allSecKeys.add(s.key);
+        if (s.key) {
+          secKeyCounts.set(s.key, (secKeyCounts.get(s.key) || 0) + (s.count || 0));
+        }
       }
     }
-    const secList = [...allSecKeys];
-    if (secList.length > 0) {
+
+    const sortedSecEntries = [...secKeyCounts.entries()].sort((a, b) => {
+      const cDiff = b[1] - a[1];
+      if (cDiff !== 0) return cDiff;
+      return String(a[0]).localeCompare(String(b[0]));
+    });
+
+    if (sortedSecEntries.length > 0) {
+      const hasMoreThan10 = sortedSecEntries.length > 10;
+      const isExpanded = Boolean(showAllSecondary);
+      const visibleEntries = (!isExpanded && hasMoreThan10)
+        ? sortedSecEntries.slice(0, 10)
+        : sortedSecEntries;
+
+      const chips = visibleEntries.map(([k, count], idx) => `
+        <button type="button" class="button text-button legend-chip" data-secondary-legend-key="${esc(k)}" style="display:inline-flex; align-items:center; gap:5px; padding:3px 7px; font-size:12px; border-radius:4px;" title="Saring hanya kategori kedua: ${esc(k)} (${count.toLocaleString('id-ID')} ${metricLabel})">
+          <span style="width:10px; height:10px; border-radius:2px; background:${getColor(k, idx)}; flex:none;" aria-hidden="true"></span>
+          <span class="mono">${esc(k)}</span>
+          <span class="muted font-mono" style="font-size:11px; opacity:0.8;">(${count.toLocaleString('id-ID')})</span>
+        </button>
+      `).join('');
+
+      const toggleBtn = hasMoreThan10 ? `
+        <button type="button" class="button text-button" data-stats-action="toggle-all-secondary" aria-expanded="${isExpanded}" style="font-size:11px; padding:3px 8px; margin-left:auto; display:inline-flex; align-items:center; gap:4px;">
+          ${icon(isExpanded ? 'down' : 'chevron')} <span>${isExpanded ? 'Tampilkan lebih sedikit' : `Tampilkan semua (${sortedSecEntries.length})`}</span>
+        </button>
+      ` : '';
+
       secondaryLegend = `
-        <div class="chart-secondary-legend" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:12px; font-size:12px;">
-          <span class="meta font-medium">Pecahan ${esc(secondaryLabel || 'Pivot Kedua')}:</span>
-          ${secList.map((k, idx) => `
-            <button type="button" class="button text-button" data-secondary-legend-key="${esc(k)}" style="display:inline-flex; align-items:center; gap:5px; padding:2px 6px; font-size:11px;" title="Saring hanya kategori kedua: ${esc(k)}">
-              <span style="width:10px; height:10px; border-radius:2px; background:${getColor(k, idx)};" aria-hidden="true"></span>
-              <span class="mono">${esc(k)}</span>
-            </button>
-          `).join('')}
+        <div class="chart-secondary-legend" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px; font-size:12px; padding:8px 12px; background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:var(--radius-sm, 6px);">
+          <span class="meta font-medium" style="margin-right:4px;">${hasMoreThan10 && !isExpanded ? `Top 10 ${esc(secondaryLabel || 'Pivot Kedua')}:` : `Pecahan ${esc(secondaryLabel || 'Pivot Kedua')} (${sortedSecEntries.length}):`}</span>
+          ${chips}
+          ${toggleBtn}
         </div>
       `;
     }
@@ -95,7 +120,24 @@ export function renderBarChart({
     if (subList && subList.length > 0) {
       let curX = labelWidth;
       const subTotal = subList.reduce((acc, s) => acc + (s.count || 0), 0) || r.count || 1;
-      rects = subList.map((sub, sIdx) => {
+
+      const sortedSubList = [...subList].sort((a, b) => {
+        const cDiff = (b.count || 0) - (a.count || 0);
+        if (cDiff !== 0) return cDiff;
+        return String(a.key || '').localeCompare(String(b.key || ''));
+      });
+
+      const hasMoreThan10Sub = sortedSubList.length > 10;
+      const isExpanded = Boolean(showAllSecondary);
+      const visibleSubList = (!isExpanded && hasMoreThan10Sub)
+        ? sortedSubList.slice(0, 10)
+        : sortedSubList;
+
+      const remainderCount = (!isExpanded && hasMoreThan10Sub)
+        ? sortedSubList.slice(10).reduce((acc, s) => acc + (s.count || 0), 0)
+        : 0;
+
+      rects = visibleSubList.map((sub, sIdx) => {
         const segW = Math.max(1, Math.round((sub.count / subTotal) * barW));
         const subColor = getColor(sub.key, sIdx);
         const subPct = Math.round((sub.count / (r.count || 1)) * 100);
@@ -108,6 +150,18 @@ export function renderBarChart({
         curX += segW;
         return rx;
       }).join('');
+
+      if (remainderCount > 0) {
+        const remW = Math.max(2, Math.round((remainderCount / subTotal) * barW));
+        const remPct = Math.round((remainderCount / (r.count || 1)) * 100);
+        rects += `
+          <rect x="${curX}" y="${y + 4}" width="${remW}" height="22" fill="var(--border)" opacity="0.75"
+                data-primary-key="${keyEsc}" data-stats-action="toggle-all-secondary" tabindex="0" role="button" aria-label="${keyEsc} → +${sortedSubList.length - 10} lainnya: ${remainderCount} ${metricLabel}" class="stacked-bar-seg stacked-bar-remainder" style="cursor:pointer;">
+            <title>${keyEsc} → +${sortedSubList.length - 10} sub-kategori lainnya: ${remainderCount} ${metricLabel} (${remPct}% dari kategori ini) — Klik untuk membuka semua</title>
+          </rect>
+        `;
+        curX += remW;
+      }
     } else {
       const color = getColor(r.key, i);
       rects = `<rect x="${labelWidth}" y="${y + 4}" width="${barW}" height="22" rx="3" fill="${color}" opacity="0.85" />`;

@@ -11,11 +11,68 @@ test('drilldown motion follows the user reduced-motion preference', () => {
   assert.equal(model.drilldownScrollBehavior(() => ({matches:false})), 'smooth');
 });
 
-test('stacked chart exposes every secondary legend category and keyboard target', () => {
-  const categories = Array.from({length:12}, (_, i) => ({key:`Synthetic ${i}`,count:1}));
-  const html = renderBarChart({items:[{key:'Rule',count:12}],total:12,secondaryDistribution:{Rule:categories}});
-  assert.equal((html.match(/data-secondary-legend-key=/g)||[]).length,12);
-  for (const cat of categories) assert.match(html,new RegExp(`data-secondary-key="${cat.key}"[^>]*tabindex="0"[^>]*role="button"`));
+test('stacked chart exposes all secondary legend categories when showAllSecondary is true', () => {
+  const categories = Array.from({length: 12}, (_, i) => ({key: `Synthetic ${i}`, count: 1}));
+  const html = renderBarChart({
+    items: [{key: 'Rule', count: 12}],
+    total: 12,
+    secondaryDistribution: {Rule: categories},
+    showAllSecondary: true,
+  });
+  assert.equal((html.match(/data-secondary-legend-key=/g) || []).length, 12);
+  for (const cat of categories) assert.match(html, new RegExp(`data-secondary-key="${cat.key}"[^>]*tabindex="0"[^>]*role="button"`));
+});
+
+test('stacked chart secondary legend limits to top 10 by default with disclosure toggle when > 10 items', () => {
+  const categories = Array.from({length: 15}, (_, i) => ({key: `Sub ${i}`, count: 20 - i}));
+  // Collapsed by default
+  const htmlCollapsed = renderBarChart({
+    items: [{key: 'Rule', count: 100}],
+    total: 100,
+    secondaryDistribution: {Rule: categories},
+    showAllSecondary: false,
+  });
+  assert.equal((htmlCollapsed.match(/data-secondary-legend-key=/g) || []).length, 10, 'Must only show 10 legend chips by default');
+  assert.match(htmlCollapsed, /data-stats-action="toggle-all-secondary"/, 'Must show toggle button in legend');
+  assert.match(htmlCollapsed, /aria-expanded="false"/);
+  assert.match(htmlCollapsed, /Tampilkan semua/);
+
+  // Expanded
+  const htmlExpanded = renderBarChart({
+    items: [{key: 'Rule', count: 100}],
+    total: 100,
+    secondaryDistribution: {Rule: categories},
+    showAllSecondary: true,
+  });
+  assert.equal((htmlExpanded.match(/data-secondary-legend-key=/g) || []).length, 15, 'Must show all 15 legend chips when expanded');
+  assert.match(htmlExpanded, /data-stats-action="toggle-all-secondary"/);
+  assert.match(htmlExpanded, /aria-expanded="true"/);
+  assert.match(htmlExpanded, /Tampilkan lebih sedikit/);
+});
+
+test('stacked bar segments cap to top 10 segments + remainder segment when > 10 items and not showAllSecondary', () => {
+  const categories = Array.from({length: 25}, (_, i) => ({key: `Path ${i}`, count: 50 - i}));
+  const htmlCollapsed = renderBarChart({
+    items: [{key: 'Rule 400', count: 1000}],
+    total: 1000,
+    secondaryDistribution: {'Rule 400': categories},
+    showAllSecondary: false,
+  });
+  // Top 10 individual segments
+  assert.equal((htmlCollapsed.match(/class="stacked-bar-seg"/g) || []).length, 10);
+  // Remainder segment
+  assert.match(htmlCollapsed, /class="stacked-bar-seg stacked-bar-remainder"/);
+  assert.match(htmlCollapsed, /\+15 sub-kategori lainnya/);
+
+  // When showAllSecondary is true, all 25 segments are rendered without remainder
+  const htmlExpanded = renderBarChart({
+    items: [{key: 'Rule 400', count: 1000}],
+    total: 1000,
+    secondaryDistribution: {'Rule 400': categories},
+    showAllSecondary: true,
+  });
+  assert.equal((htmlExpanded.match(/class="stacked-bar-seg"/g) || []).length, 25);
+  assert.doesNotMatch(htmlExpanded, /stacked-bar-remainder/);
 });
 
 test('statistics tables are keyboard-scrollable and log expansion exposes its state', () => {

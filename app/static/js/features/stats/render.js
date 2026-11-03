@@ -203,6 +203,7 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
       metric: data.metric,
       secondaryDistribution: data.secondary_distribution,
       secondaryLabel: secLabel,
+      showAllSecondary,
     });
   } else if (query.chart === 'donut') {
     chartHtml = renderDonutChart({items, total, metric: data.metric});
