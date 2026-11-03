@@ -22,6 +22,8 @@ export function mount(ctx) {
   let showAllSecondary = false;
 
   root.classList.add('stats-page');
+  if (query.chart_scale === 'large') root.classList.add('chart-scale-large');
+  else root.classList.remove('chart-scale-large');
   root.innerHTML = statsPage(query);
   const resultsContainer = root.querySelector('#stats-results');
   const batchDialog = root.querySelector('#stats-batch-incident-dialog');
@@ -273,6 +275,10 @@ export function mount(ctx) {
     }
     if (btn.dataset.chart) {
       updateRoute({chart: btn.dataset.chart});
+      return;
+    }
+    if (btn.dataset.chartScale) {
+      updateRoute({chart_scale: btn.dataset.chartScale});
       return;
     }
     if (btn.id === 'btn-apply-pattern') {
@@ -748,7 +754,7 @@ export function mount(ctx) {
   loadData();
 
   return () => {
-    root.classList.remove('stats-page');
+    root.classList.remove('stats-page', 'chart-scale-large');
     session.dispose();
     activeRequest?.abort();
     batchDialog?.close();

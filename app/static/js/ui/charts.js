@@ -47,6 +47,7 @@ export function renderBarChart({
   secondaryDistribution = null,
   secondaryLabel = '',
   showAllSecondary = false,
+  scale = 'normal',
 } = {}) {
   const metricLabel = metric === 'events' ? 'event' : 'alert';
   const allRows = [...items];
@@ -54,11 +55,15 @@ export function renderBarChart({
     return `<div class="chart-empty"><p class="muted">Tidak ada data untuk ditampilkan pada grafik ini.</p></div>`;
   }
 
-  const rowHeight = 44;
-  const height = allRows.length * rowHeight + 32;
-  const width = 960;
-  const labelWidth = 350;
-  const barMaxWidth = width - labelWidth - 120;
+  const isLarge = scale === 'large';
+  const rowHeight = isLarge ? 64 : 44;
+  const barHeight = isLarge ? 34 : 22;
+  const height = allRows.length * rowHeight + (isLarge ? 40 : 32);
+  const width = isLarge ? 1200 : 960;
+  const labelWidth = isLarge ? 420 : 350;
+  const labelFontSize = isLarge ? 15 : 13;
+  const countFontSize = isLarge ? 14 : 12;
+  const barMaxWidth = width - labelWidth - (isLarge ? 140 : 120);
 
   // Gather and sort unique secondary keys for global legend by aggregate count desc, key asc
   let secondaryLegend = '';
@@ -86,7 +91,7 @@ export function renderBarChart({
         : sortedSecEntries;
 
       const chips = visibleEntries.map(([k, count], idx) => `
-        <button type="button" class="button text-button legend-chip" data-secondary-legend-key="${esc(k)}" style="display:inline-flex; align-items:center; gap:5px; padding:3px 7px; font-size:12px; border-radius:4px;" title="Saring hanya kategori kedua: ${esc(k)} (${count.toLocaleString('id-ID')} ${metricLabel})">
+        <button type="button" class="button text-button legend-chip" data-secondary-legend-key="${esc(k)}" style="display:inline-flex; align-items:center; gap:5px; padding:${isLarge ? '4px 9px' : '3px 7px'}; font-size:${isLarge ? '13px' : '12px'}; border-radius:4px;" title="Saring hanya kategori kedua: ${esc(k)} (${count.toLocaleString('id-ID')} ${metricLabel})">
           <span style="width:10px; height:10px; border-radius:2px; background:${getColor(k, idx)}; flex:none;" aria-hidden="true"></span>
           <span class="mono">${esc(k)}</span>
           <span class="muted font-mono" style="font-size:11px; opacity:0.8;">(${count.toLocaleString('id-ID')})</span>
@@ -100,7 +105,7 @@ export function renderBarChart({
       ` : '';
 
       secondaryLegend = `
-        <div class="chart-secondary-legend" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px; font-size:12px; padding:8px 12px; background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:var(--radius-sm, 6px);">
+        <div class="chart-secondary-legend" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:14px; font-size:${isLarge ? '13px' : '12px'}; padding:${isLarge ? '10px 16px' : '8px 12px'}; background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:var(--radius-sm, 6px);">
           <span class="meta font-medium" style="margin-right:4px;">${hasMoreThan10 && !isExpanded ? `Top 10 ${esc(secondaryLabel || 'Pivot Kedua')}:` : `Pecahan ${esc(secondaryLabel || 'Pivot Kedua')} (${sortedSecEntries.length}):`}</span>
           ${chips}
           ${toggleBtn}
@@ -110,7 +115,7 @@ export function renderBarChart({
   }
 
   const bars = allRows.map((r, i) => {
-    const y = i * rowHeight + 15;
+    const y = i * rowHeight + (isLarge ? 20 : 15);
     const pct = Number(r.displayPercentage ?? ((r.count / total) * 100)) || 0;
     const barW = Math.max(2, Math.round((pct / 100) * barMaxWidth));
     const keyEsc = esc(r.key);
@@ -142,7 +147,7 @@ export function renderBarChart({
         const subColor = getColor(sub.key, sIdx);
         const subPct = Math.round((sub.count / (r.count || 1)) * 100);
         const rx = `
-          <rect x="${curX}" y="${y + 4}" width="${segW}" height="22" fill="${subColor}" opacity="0.9"
+          <rect x="${curX}" y="${y + 4}" width="${segW}" height="${barHeight}" fill="${subColor}" opacity="0.9"
                 data-primary-key="${keyEsc}" data-secondary-key="${esc(sub.key)}" tabindex="0" role="button" aria-label="${keyEsc} → ${esc(sub.key)}: ${sub.count} ${metricLabel}" class="stacked-bar-seg" style="cursor:pointer;">
             <title>${keyEsc} → ${esc(sub.key)}: ${sub.count} ${metricLabel} (${subPct}% dari kategori ini) — Klik untuk saring</title>
           </rect>
@@ -155,7 +160,7 @@ export function renderBarChart({
         const remW = Math.max(2, Math.round((remainderCount / subTotal) * barW));
         const remPct = Math.round((remainderCount / (r.count || 1)) * 100);
         rects += `
-          <rect x="${curX}" y="${y + 4}" width="${remW}" height="22" fill="var(--border)" opacity="0.75"
+          <rect x="${curX}" y="${y + 4}" width="${remW}" height="${barHeight}" fill="var(--border)" opacity="0.75"
                 data-primary-key="${keyEsc}" data-stats-action="toggle-all-secondary" tabindex="0" role="button" aria-label="${keyEsc} → +${sortedSubList.length - 10} lainnya: ${remainderCount} ${metricLabel}" class="stacked-bar-seg stacked-bar-remainder" style="cursor:pointer;">
             <title>${keyEsc} → +${sortedSubList.length - 10} sub-kategori lainnya: ${remainderCount} ${metricLabel} (${remPct}% dari kategori ini) — Klik untuk membuka semua</title>
           </rect>
@@ -164,15 +169,15 @@ export function renderBarChart({
       }
     } else {
       const color = getColor(r.key, i);
-      rects = `<rect x="${labelWidth}" y="${y + 4}" width="${barW}" height="22" rx="3" fill="${color}" opacity="0.85" />`;
+      rects = `<rect x="${labelWidth}" y="${y + 4}" width="${barW}" height="${barHeight}" rx="3" fill="${color}" opacity="0.85" />`;
     }
 
     return `
       <g class="chart-bar-row" data-chart-key="${keyEsc}" tabindex="0" role="button" aria-label="${keyEsc}: ${r.count} ${metricLabel} (${pct}%)">
         <title>${keyEsc}: ${r.count} ${metricLabel} (${pct}%)</title>
-        <text x="${labelWidth - 12}" y="${y + 19}" text-anchor="end" fill="var(--text)" font-size="13" font-family="var(--font)">${keyEsc.length > 46 ? esc(keyEsc.slice(0, 44) + '…') : keyEsc}</text>
+        <text x="${labelWidth - 12}" y="${y + (barHeight / 2) + 5}" text-anchor="end" fill="var(--text)" font-size="${labelFontSize}" font-family="var(--font)">${keyEsc.length > (isLarge ? 56 : 46) ? esc(keyEsc.slice(0, isLarge ? 54 : 44) + '…') : keyEsc}</text>
         ${rects}
-        <text x="${labelWidth + barW + 10}" y="${y + 20}" fill="var(--muted)" font-size="12" font-family="var(--mono)">${r.count} ${metricLabel} (${pct}%)</text>
+        <text x="${labelWidth + barW + 10}" y="${y + (barHeight / 2) + 5}" fill="var(--muted)" font-size="${countFontSize}" font-family="var(--mono)">${r.count} ${metricLabel} (${pct}%)</text>
       </g>
     `;
   }).join('');
@@ -188,18 +193,19 @@ export function renderBarChart({
   `;
 }
 
-export function renderDonutChart({items = [], otherCount = 0, otherPercentage = 0, total = 0, metric = 'alerts'} = {}) {
+export function renderDonutChart({items = [], otherCount = 0, otherPercentage = 0, total = 0, metric = 'alerts', scale = 'normal'} = {}) {
   const metricLabel = metric === 'events' ? 'event' : 'alert';
   const allRows = [...items];
   if (!allRows.length || total <= 0) {
     return `<div class="chart-empty"><p class="muted">Tidak ada data untuk grafik donut.</p></div>`;
   }
 
-  const size = 380;
+  const isLarge = scale === 'large';
+  const size = isLarge ? 460 : 380;
   const cx = size / 2;
   const cy = size / 2;
-  const rOuter = 145;
-  const rInner = 90;
+  const rOuter = isLarge ? 180 : 145;
+  const rInner = isLarge ? 110 : 90;
 
   let currentAngle = -Math.PI / 2;
   const paths = allRows.map((row, i) => {
@@ -261,18 +267,19 @@ export function renderDonutChart({items = [], otherCount = 0, otherPercentage = 
   `;
 }
 
-export function renderLineChart({timeSeries = [], topKeys = [], metric = 'alerts'} = {}) {
+export function renderLineChart({timeSeries = [], topKeys = [], metric = 'alerts', scale = 'normal'} = {}) {
   const metricLabel = metric === 'events' ? 'event' : 'alert';
   if (!timeSeries.length) {
     return `<div class="chart-empty"><p class="muted">Tidak ada data rentang waktu untuk grafik tren.</p></div>`;
   }
 
-  const width = 840;
-  const height = 320;
-  const padLeft = 55;
-  const padRight = 30;
-  const padTop = 25;
-  const padBottom = 45;
+  const isLarge = scale === 'large';
+  const width = isLarge ? 1100 : 840;
+  const height = isLarge ? 420 : 320;
+  const padLeft = isLarge ? 65 : 55;
+  const padRight = isLarge ? 35 : 30;
+  const padTop = isLarge ? 30 : 25;
+  const padBottom = isLarge ? 55 : 45;
 
   const chartW = width - padLeft - padRight;
   const chartH = height - padTop - padBottom;

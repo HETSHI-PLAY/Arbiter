@@ -532,6 +532,7 @@ def get_stats(
     metric: str = "alerts",
     top_n: int = 8,
     chart: str = "bar",
+    chart_scale: str = "normal",
     bucket: str = "auto",
     pattern: str = "",
     other_details: bool = False,

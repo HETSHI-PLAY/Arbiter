@@ -149,12 +149,23 @@ export function statsPage(query) {
     </section>
 
     <div class="stats-chart-toolbar">
-        <div class="field stats-field-auto">
-          <label for="stats-chart-segmented">Tipe visualisasi</label>
-          <div class="segmented stats-segmented" id="stats-chart-segmented">
-            ${CHART_OPTIONS.map(([val, lbl]) => `<button type="button" class="btn-seg ${query.chart === val ? 'active' : ''}" data-chart="${val}" aria-pressed="${query.chart === val}">${esc(lbl)}</button>`).join('')}
-          </div>
+      <div class="field stats-field-auto">
+        <label for="stats-chart-segmented">Tipe visualisasi</label>
+        <div class="segmented stats-segmented" id="stats-chart-segmented">
+          ${CHART_OPTIONS.map(([val, lbl]) => `<button type="button" class="btn-seg ${query.chart === val ? 'active' : ''}" data-chart="${val}" aria-pressed="${query.chart === val}">${esc(lbl)}</button>`).join('')}
         </div>
+      </div>
+      <div class="field stats-field-auto stats-scale-control" style="margin-left:auto;">
+        <label for="stats-scale-segmented">Ukuran grafik</label>
+        <div class="segmented stats-segmented" id="stats-scale-segmented">
+          <button type="button" class="btn-seg ${query.chart_scale !== 'large' ? 'active' : ''}" data-chart-scale="normal" aria-pressed="${query.chart_scale !== 'large'}" title="Ukuran standar seimbang">
+            Standar
+          </button>
+          <button type="button" class="btn-seg ${query.chart_scale === 'large' ? 'active' : ''}" data-chart-scale="large" aria-pressed="${query.chart_scale === 'large'}" title="Perbesar balok, kanvas, dan font agar lebih dominan">
+            ${icon('fullscreen')} Besar
+          </button>
+        </div>
+      </div>
     </div>
     <div id="stats-workspace" class="stack">
       <div id="stats-results"></div>
@@ -204,11 +215,12 @@ export function statsResults(data, query, {drilldownAlerts = null, selectedIds =
       secondaryDistribution: data.secondary_distribution,
       secondaryLabel: secLabel,
       showAllSecondary,
+      scale: query.chart_scale,
     });
   } else if (query.chart === 'donut') {
-    chartHtml = renderDonutChart({items, total, metric: data.metric});
+    chartHtml = renderDonutChart({items, total, metric: data.metric, scale: query.chart_scale});
   } else if (query.chart === 'line') {
-    chartHtml = renderLineChart({timeSeries: data.time_series || [], topKeys: items.map(it => it.key), metric: data.metric});
+    chartHtml = renderLineChart({timeSeries: data.time_series || [], topKeys: items.map(it => it.key), metric: data.metric, scale: query.chart_scale});
   }
 
   const tableRows = items.map(item => {

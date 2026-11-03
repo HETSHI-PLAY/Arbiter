@@ -4,6 +4,8 @@
 #stats-results{min-width:0}
 .stats-page .table-region{max-width:100%;overflow:auto}
 .stats-page .chart-svg.bar-chart,.stats-page .chart-svg.line-chart{width:100%;min-width:640px;max-width:1080px}
+.stats-page.chart-scale-large .chart-svg.bar-chart,.stats-page.chart-scale-large .chart-svg.line-chart{max-width:1380px}
+.stats-page.chart-scale-large .chart-container{padding:20px}
 .stats-page .chart-svg:focus-visible,.stats-page .chart-svg [tabindex]:focus-visible{outline:2px solid var(--text);outline-offset:3px}
 .stats-page .table-region:focus-visible,.stats-page summary:focus-visible{outline:2px solid var(--info);outline-offset:3px}
 .stats-page .chart-legend-item{white-space:normal;overflow-wrap:anywhere;text-align:left}

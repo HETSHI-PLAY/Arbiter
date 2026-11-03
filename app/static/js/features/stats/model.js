@@ -39,6 +39,7 @@ export function normalizeStatsQuery(params = new URLSearchParams()) {
   const pivot_by = choices(get('pivot_by'), pKeys, 'rule_description');
   const metric = choices(get('metric'), ['alerts', 'events'], 'alerts');
   const chart = choices(get('chart'), ['bar', 'donut', 'line', 'table'], 'bar');
+  const chart_scale = choices(get('chart_scale'), ['normal', 'large'], 'normal');
   const top_n = Math.min(1000, Math.max(1, integer(get('top_n'), 500) || 500));
   const bucket = choices(get('bucket'), ['auto', 'minute', 'hour', 'day'], 'auto');
   const pattern = String(get('pattern') || '').trim();
@@ -54,6 +55,7 @@ export function normalizeStatsQuery(params = new URLSearchParams()) {
     secondary_pivot,
     metric,
     chart,
+    chart_scale,
     top_n,
     bucket,
     pattern,
@@ -89,6 +91,7 @@ export function statsScopeParams(query) {
   if (query.secondary_pivot) p.set('secondary_pivot', query.secondary_pivot);
   if (query.metric && query.metric !== 'alerts') p.set('metric', query.metric);
   if (query.chart && query.chart !== 'bar') p.set('chart', query.chart);
+  if (query.chart_scale && query.chart_scale !== 'normal') p.set('chart_scale', query.chart_scale);
   if (query.top_n && query.top_n !== 500) p.set('top_n', String(query.top_n));
   if (query.bucket && query.bucket !== 'auto') p.set('bucket', query.bucket);
   if (query.pattern) p.set('pattern', query.pattern);

@@ -248,5 +248,46 @@ test('single subcategory drill-down mode is a distinct inspection level: filters
   assert.match(drilldownHtml, /Tampilkan Semua Sub-kategori \(15\)/);
 });
 
+test('chart_scale query normalization defaults to normal and parses large', () => {
+  assert.equal(normalizeStatsQuery(new URLSearchParams('')).chart_scale, 'normal');
+  assert.equal(normalizeStatsQuery(new URLSearchParams('chart_scale=large')).chart_scale, 'large');
+  assert.equal(normalizeStatsQuery(new URLSearchParams('chart_scale=invalid')).chart_scale, 'normal');
+});
+
+test('chart scale feature enlarges bar, donut, and line charts significantly in large mode', async () => {
+  const {renderBarChart, renderDonutChart, renderLineChart} = await import('../../app/static/js/ui/charts.js');
+  // Bar chart normal vs large
+  const barNormal = renderBarChart({items: [{key: 'Rule 1', count: 10}], total: 10, scale: 'normal'});
+  const barLarge = renderBarChart({items: [{key: 'Rule 1', count: 10}], total: 10, scale: 'large'});
+  assert.match(barNormal, /viewBox="0 0 960/);
+  assert.match(barLarge, /viewBox="0 0 1200/);
+  assert.match(barLarge, /height="34"/);
+
+  // Donut chart normal vs large
+  const donutNormal = renderDonutChart({items: [{key: 'Rule 1', count: 10}], total: 10, scale: 'normal'});
+  const donutLarge = renderDonutChart({items: [{key: 'Rule 1', count: 10}], total: 10, scale: 'large'});
+  assert.match(donutNormal, /viewBox="0 0 380 380"/);
+  assert.match(donutLarge, /viewBox="0 0 460 460"/);
+
+  // Line chart normal vs large
+  const lineNormal = renderLineChart({timeSeries: [{bucket: '2026-01-01', total: 10}], topKeys: ['Rule 1'], scale: 'normal'});
+  const lineLarge = renderLineChart({timeSeries: [{bucket: '2026-01-01', total: 10}], topKeys: ['Rule 1'], scale: 'large'});
+  assert.match(lineNormal, /viewBox="0 0 840 320"/);
+  assert.match(lineLarge, /viewBox="0 0 1100 420"/);
+});
+
+test('stats page toolbar renders chart scale segmented control with normal and large options', async () => {
+  const {statsPage} = await import('../../app/static/js/features/stats/render.js');
+  const queryNormal = normalizeStatsQuery(new URLSearchParams(''));
+  const htmlNormal = statsPage(queryNormal);
+  assert.match(htmlNormal, /data-chart-scale="normal"/);
+  assert.match(htmlNormal, /data-chart-scale="large"/);
+  assert.match(htmlNormal, /Ukuran grafik/);
+
+  const queryLarge = normalizeStatsQuery(new URLSearchParams('chart_scale=large'));
+  const htmlLarge = statsPage(queryLarge);
+  assert.match(htmlLarge, /<button[^>]*class="[^"]*active[^"]*"[^>]*data-chart-scale="large"/);
+});
+
 
 
