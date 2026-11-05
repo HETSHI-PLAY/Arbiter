@@ -4,6 +4,8 @@
 .venv/
 venv/
 ENV/
+secret.key
+.arbiter/
 
 # Python cache
 __pycache__/

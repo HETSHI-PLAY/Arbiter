@@ -46,9 +46,9 @@ When investigating high-volume attacks (credential stuffing, SSH brute-force, we
 - Workspace tenant selector with real-time population from database.
 - Isolate investigations per tenant or triage across all tenants simultaneously.
 
-### 5. Modular Four-Destination UI
+### 5. Modular Destination UI
 
-Arbiter uses a **Quiet Evidence Desk** design with four focused destinations instead of a monolithic single-page layout:
+Arbiter uses a **Quiet Evidence Desk** design with focused destinations instead of a monolithic single-page layout:
 
 | Destination | Route | Purpose |
 |-------------|-------|---------|
@@ -56,6 +56,7 @@ Arbiter uses a **Quiet Evidence Desk** design with four focused destinations ins
 | **Insiden** | `#/incidents/:id` | Case editor: evidence grouping, analysis, conclusions, recommendations |
 | **Impor** | `#/imports` | Paste or upload new Wazuh JSON exports |
 | **Laporan** | `#/reports` | Scoped export (CSV, JSON, clipboard HTML, .docx, .xlsx) |
+| **Pengaturan** | `#/settings` | Wazuh Indexer connection, realtime monitor, sidebar preference |
 
 ### 6. Review & Triage Workflow
 - Flag alerts as Pending or Reviewed, individually or in batch.
@@ -181,15 +182,12 @@ cp .env.example .env
 ## 🧪 Testing & Quality Assurance
 
 ```bash
-# Frontend tests (44 tests)
+# Frontend tests (125 tests)
 node --test tests/frontend/*.test.mjs
 
-# Backend tests — safe isolated suites (61 tests)
+# Backend tests — safe isolated suites (92 tests)
 .venv/bin/python -m unittest tests.test_parser tests.test_exports \
-  tests.test_privacy tests.test_dedup tests.test_ui_api tests.test_ui_safety -q
-
-# Synthetic browser QA server (port 8767, NOT production)
-.venv/bin/python -m tests.serve_synthetic_ui
+  tests.test_privacy tests.test_dedup tests.test_ui_api tests.test_ui_safety tests.test_settings -q
 
 # Design system lint
 npx -y @google/design.md@0.4.0 lint docs/ui-ux-redesign/DESIGN.md
@@ -202,6 +200,7 @@ npx -y @google/design.md@0.4.0 lint docs/ui-ux-redesign/DESIGN.md
 - **No Remote Telemetry**: Arbiter does not phone home, load tracking pixels, or transmit sensitive telemetry to third parties.
 - **Airgapped Design**: Local rule-based correlation and local database queries ensure that internal IP addresses, infrastructure paths, and user data remain strictly confidential.
 - **Font & Asset Locality**: All fonts and assets served locally. No CDN, no external fetches.
+- **Credentials Encrypted at Rest**: Wazuh Indexer passwords and Remote database URIs are encrypted with a local key before being stored in PostgreSQL. The key is read from `ARBITER_SECRET_KEY` / `ARBITER_SECRET_KEY_FILE`, or generated as a `0600` file outside the repository. Never commit it; `.env` is gitignored.
 
 ---
 

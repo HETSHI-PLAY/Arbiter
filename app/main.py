@@ -7,6 +7,7 @@ import io
 import json
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -16,6 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import HOST, PORT
+from app.ai_triage import safe_alerts, test_ollama, triage_with_fallback
 from app.core import normalize_alert, suggestions_with_fallback
 from app.intel import enrich_ip, is_valid_ip, sync_remote_cache, upsert_ip_cache
 import app.database as db_module
@@ -30,12 +32,27 @@ from app.exports import (
 from app.parser import parse_export
 from app.privacy import sanitize_text
 from app.query import alert_where, normalize_tenants, positive_ids, tenant_clause, validated_group_id, PIVOT_DEFINITIONS, FACET_COLUMNS, is_malicious_alert_record
+from app.settings import (
+    load_settings,
+    migrate_settings,
+    redact_settings,
+    save_settings,
+    test_wazuh_connection,
+    validate_settings,
+    wazuh_password,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Ensure tables, schemas, and indices are fully initialized on startup
     init_database()
+    try:
+        with get_db() as conn:
+            migrate_settings(conn)
+    except Exception:
+        # Startup must not fail if legacy credential migration is not possible.
+        pass
     yield
 
 
@@ -72,6 +89,15 @@ def health_check():
         "ip_intel_records": intel_n,
         "privacy": "airgapped_local",
     }
+
+
+@app.get("/health", include_in_schema=False)
+def health_alias():
+    """Lightweight liveness probe for reverse proxies and monitors.
+
+    Full workspace aggregates remain at /api/health.
+    """
+    return {"status": "ok", "app": "Arbiter"}
 
 
 @app.get("/api/tenants")
@@ -1046,6 +1072,97 @@ def get_suggestions(
     return {"mode": mode, "warning": warning, "suggestions": groups_list}
 
 
+@app.get("/api/realtime/count")
+def api_realtime_count():
+    """Count Medium+ Wazuh alerts without downloading or storing any alert."""
+    with get_db() as conn:
+        stored = load_settings(conn)
+    wazuh = stored.get("wazuh", {})
+    if not wazuh.get("indexer_url"):
+        raise HTTPException(status_code=400, detail="Wazuh Indexer belum dikonfigurasi di halaman Pengaturan.")
+    try:
+        result = test_wazuh_connection(
+            indexer_url=wazuh.get("indexer_url", ""),
+            username=wazuh.get("username", ""),
+            password=wazuh_password(stored),
+            index_pattern=wazuh.get("index_pattern", "wazuh-alerts-*"),
+            verify_tls=bool(wazuh.get("verify_tls", True)),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from None
+    return {**result, "checked_at": datetime.now(timezone.utc).isoformat()}
+
+
+@app.post("/api/ai/test")
+def api_ai_test(payload: dict[str, Any]):
+    with get_db() as conn:
+        stored = load_settings(conn)
+    ai = stored.get("ai", {})
+    base_url = str(payload.get("base_url") or ai.get("base_url") or "http://127.0.0.1:11434").strip()
+    model = str(payload.get("model") or ai.get("model") or "").strip()
+    if not model:
+        raise HTTPException(status_code=400, detail="Model AI belum diatur.")
+    try:
+        return test_ollama(base_url=base_url, model=model)
+    except ValueError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from None
+
+
+@app.post("/api/ai/triage")
+def api_ai_triage(payload: dict[str, Any]):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload AI triage tidak valid.")
+    try:
+        limit = int(payload.get("limit") or 40)
+        min_rule_level = int(payload.get("min_rule_level") or 7)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="limit dan min_rule_level harus berupa angka.") from None
+    if not 5 <= limit <= 100:
+        raise HTTPException(status_code=400, detail="limit harus antara 5 dan 100.")
+    if not 0 <= min_rule_level <= 15:
+        raise HTTPException(status_code=400, detail="min_rule_level harus antara 0 dan 15.")
+
+    tenant = payload.get("tenant") or ["all"]
+    where, params = alert_where(tenant=tenant, review_status=str(payload.get("review_status") or "unreviewed"))
+    level_clause = "a.rule_level >= %s"
+    if where:
+        where = f"{where} AND {level_clause}"
+    else:
+        where = f"WHERE {level_clause}"
+    query_params = list(params) + [min_rule_level, limit]
+    with get_db() as conn:
+        rows = conn.execute(
+            f"""SELECT a.id, a.alert_id, a.timestamp, a.tenant, a.agent_name, a.agent_ip,
+                       a.rule_id, a.rule_level, a.description, a.rule_groups, a.source_ip,
+                       a.mitre_ids, a.cve, a.hit_count, a.log_signature
+                FROM wazuh.alerts a {where}
+                ORDER BY a.rule_level DESC NULLS LAST, a.timestamp DESC NULLS LAST, a.id DESC
+                LIMIT %s""",
+            query_params,
+        ).fetchall()
+        stored = load_settings(conn)
+    alerts = [{**row, "id": str(row["id"])} for row in rows]
+    ai = stored.get("ai", {})
+    groups, mode, warning = triage_with_fallback(
+        alerts,
+        enabled=bool(ai.get("enabled")),
+        model=str(ai.get("model") or ""),
+        base_url=str(ai.get("base_url") or "http://127.0.0.1:11434"),
+        timeout=float(ai.get("timeout_seconds") or 90),
+    )
+    if not ai.get("enabled") and not warning:
+        warning = "AI Triage belum diaktifkan di Pengaturan; hasil memakai heuristik lokal."
+    return {
+        "mode": mode,
+        "warning": warning,
+        "model": ai.get("model"),
+        "alert_count": len(alerts),
+        "min_rule_level": min_rule_level,
+        "alerts": safe_alerts(alerts),
+        "groups": groups,
+    }
+
+
 # A bounded, complete export is returned, or an explicit 413; never a partial file.
 MAX_EXPORT_ALERTS = 10_000
 
@@ -1201,6 +1318,53 @@ def export_csv(scope: dict[str, Any] = Depends(export_scope)):
 def api_sanitize_logs(payload: dict[str, Any]):
     text = str(payload.get("text") or "").strip()
     return {"sanitized": sanitize_text(text)}
+
+
+@app.get("/api/settings")
+def api_get_settings():
+    with get_db() as conn:
+        stored = load_settings(conn)
+    return {"settings": redact_settings(stored)}
+
+
+@app.put("/api/settings")
+def api_put_settings(payload: dict[str, Any]):
+    with get_db() as conn:
+        current = load_settings(conn)
+        try:
+            updated = validate_settings(payload, current)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+        save_settings(conn, updated)
+    return {"settings": redact_settings(updated)}
+
+
+@app.post("/api/settings/wazuh/test")
+def api_test_wazuh(payload: dict[str, Any]):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload pengujian tidak valid.")
+    with get_db() as conn:
+        stored = load_settings(conn)
+    wazuh = stored.get("wazuh", {})
+    url = str(payload.get("indexer_url", wazuh.get("indexer_url", "")) or "").strip()
+    username = str(payload.get("username", wazuh.get("username", "")) or "").strip()
+    password = payload.get("password")
+    if password is None or password == "":
+        password = wazuh_password(stored)
+    pattern = str(payload.get("index_pattern", wazuh.get("index_pattern", "wazuh-alerts-*")) or "").strip()
+    verify_tls = payload.get("verify_tls", wazuh.get("verify_tls", True))
+    if not isinstance(verify_tls, bool):
+        raise HTTPException(status_code=400, detail="verify_tls harus berupa boolean (true/false).")
+    try:
+        return test_wazuh_connection(
+            indexer_url=url,
+            username=username,
+            password=str(password or ""),
+            index_pattern=pattern,
+            verify_tls=verify_tls,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from None
 
 
 @app.get("/api/database/status")

@@ -75,6 +75,9 @@ class SyntheticDB:
         CREATE TABLE wazuh.alert_group_members (
             alert_pk INTEGER, group_id TEXT, UNIQUE(alert_pk, group_id)
         );
+        CREATE TABLE wazuh.app_settings (
+            key TEXT PRIMARY KEY, value TEXT, updated_at TEXT
+        );
         """)
         self.calls = []
         self.add_alert(1, "Alpha", description="Synthetic curl bot", hit_count=3)
@@ -386,6 +389,12 @@ class UIAPIContractTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 200, response.text)
                     ids.extend(item["id"] for item in response.json()["items"])
                 self.assertEqual(ids, [3, 2, 1])
+
+    def test_health_alias_is_lightweight_and_needs_no_database(self):
+        with patch.object(self.api, "get_db", side_effect=AssertionError("health alias must not query the database")):
+            response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"status": "ok", "app": "Arbiter"})
 
     def test_static_mount_serves_only_its_directory_without_database(self):
         import tempfile

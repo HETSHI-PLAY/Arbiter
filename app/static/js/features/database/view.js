@@ -295,14 +295,16 @@ export async function mount(ctx) {
       if (!val) { notify('URI tidak boleh kosong.', 'error'); return; }
       btn.disabled = true;
       try {
-        await json(apiURL('/api/database/config'), {
+        const saved = await json(apiURL('/api/database/config'), {
           method: 'POST',
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({profile: 'remote', url: val}),
           signal,
         });
         uriDraft = '';
-        notify('URI Remote PC Intel disimpan.', 'success');
+        notify(saved?.persisted === false
+          ? 'URI Remote PC Intel tersimpan sementara; database lokal belum tersedia untuk menyimpannya permanen.'
+          : 'URI Remote PC Intel disimpan (terenkripsi) dan bertahan setelah restart.', saved?.persisted === false ? 'warning' : 'success');
         await loadStatus();
       } catch (err) {
         if (err.name !== 'AbortError') notify(err.message, 'error');

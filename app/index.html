@@ -28,7 +28,10 @@
         <a class="nav-link" data-page="incidents" href="#/incidents"><span data-icon="cases"></span>Insiden</a>
         <a class="nav-link" data-page="imports" href="#/imports"><span data-icon="upload"></span>Impor</a>
         <a class="nav-link" data-page="reports" href="#/reports"><span data-icon="report"></span>Laporan</a>
+        <a class="nav-link" data-page="realtime" href="#/realtime"><span data-icon="pulse"></span>Realtime</a>
+        <a class="nav-link" data-page="ai-triage" href="#/ai-triage"><span data-icon="spark"></span>AI Triage</a>
         <a class="nav-link" data-page="database" href="#/database"><span data-icon="database"></span>Database</a>
+        <a class="nav-link" data-page="settings" href="#/settings"><span data-icon="settings"></span>Pengaturan</a>
       </nav>
       <div class="sidebar-bottom">
         <p class="privacy-note"><span data-icon="shield"></span><span>Data tetap di workspace lokal.</span></p>
@@ -39,11 +42,13 @@
     <div class="workspace" id="workspace">
       <header class="utility-bar">
         <div class="workspace-switcher">
+          <button class="button icon-button sidebar-toggle" id="toggle-sidebar" aria-label="Sembunyikan navigasi" aria-controls="sidebar" aria-expanded="true"></button>
           <button class="button icon-button mobile-menu" id="open-navigation" aria-label="Buka navigasi" aria-controls="sidebar" aria-expanded="false"></button>
           <span id="workspace-tenant-label">Workspace</span>
           <button class="button" id="workspace-tenant" type="button" aria-labelledby="workspace-tenant-label" aria-haspopup="dialog">Semua tenant</button>
         </div>
         <div class="utility-actions">
+          <button class="button icon-button realtime-toggle" id="realtime-toggle" aria-pressed="false" aria-label="Aktifkan monitor realtime Wazuh" title="Monitor realtime: nonaktif"></button>
           <span class="connection" id="connection-state" data-state="checking" role="status"><span class="status-dot" aria-hidden="true"></span><span class="connection-label">Memeriksa koneksi…</span></span>
           <button class="button icon-button" id="refresh-workspace" aria-label="Perbarui area kerja"></button>
         </div>

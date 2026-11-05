@@ -21,4 +21,4 @@ A case with no evidence can be created from **Semua tenant**. A tenant-scoped ca
 
 ## Development verification
 
-Use `tests.serve_synthetic_ui` for browser work and explicitly named isolated suites. Do not run the original `tests.test_api` against the active SGU database. The synthetic adapter checks query behavior but is not PostgreSQL execution certification.
+Use explicitly named isolated suites for QA. Do not run the original `tests.test_api` against the active SGU database.

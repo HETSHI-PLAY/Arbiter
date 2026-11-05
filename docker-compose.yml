@@ -11,8 +11,11 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql://nothrovo@127.0.0.1:5432/abuseip}
       REMOTE_DATABASE_URL: ${REMOTE_DATABASE_URL:-postgresql://nothrovo@192.168.1.50:5432/abuseip}
       ABUSEIPDB_API_KEY: ${ABUSEIPDB_API_KEY:-}
+      ARBITER_SECRET_KEY: ${ARBITER_SECRET_KEY:-}
+      ARBITER_SECRET_KEY_FILE: /data/secret.key
     volumes:
       - ./app:/app/app
+      - arbiter_secrets:/data
 
   # Standalone PostgreSQL container (for users without local Postgres)
   # Run with: docker compose --profile standalone up -d
@@ -38,3 +41,4 @@ services:
 
 volumes:
   arbiter_pgdata:
+  arbiter_secrets:

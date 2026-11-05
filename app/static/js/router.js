@@ -3,7 +3,7 @@ export function parseRoute(hash = '') {
   const [pathPart, search = ''] = raw.split('?');
   const path = pathPart.startsWith('/') ? pathPart : '/triage';
   const first = path.split('/')[1];
-  return {path, params: new URLSearchParams(search), page: ['triage', 'stats', 'incidents', 'imports', 'reports', 'database'].includes(first) ? first : 'not-found'};
+  return {path, params: new URLSearchParams(search), page: ['triage', 'stats', 'incidents', 'imports', 'reports', 'realtime', 'ai-triage', 'database', 'settings'].includes(first) ? first : 'not-found'};
 }
 export const withParams = (path, params) => `#${path}${params?.size ? `?${params}` : ''}`;
 export function createRouter(onChange, canLeave = () => true) {

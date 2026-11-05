@@ -21,6 +21,9 @@ const paths = {
   clock: '<circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 2"/>',
   chart: '<path d="M2 13h12M4 10V7M8 10V4M12 10V5"/>',
   database: '<ellipse cx="8" cy="4" rx="6" ry="2.5"/><path d="M2 4v8c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5V4"/><path d="M2 8c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5"/>',
+  settings: '<circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4"/>',
+  pulse: '<path d="M1.5 8h3l2-5 3 10 2-5h3"/>',
+  spark: '<path d="M8 1.5 9.4 6l4.6 1.4L9.4 9 8 13.5 6.6 9 2 7.4 6.6 6z"/><path d="M13 11.5 13.5 13l1.5.5-1.5.5L13 15.5l-.5-1.5L11 13.5l1.5-.5z"/>',
   delete: '<path d="M3 4h10M6 4V2h4v2M5 4v9h6V4"/>',
 };
 export function icon(name) { return `<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.chevron}</svg>`; }

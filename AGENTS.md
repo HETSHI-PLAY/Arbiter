@@ -53,13 +53,15 @@ app/
 │       │   ├── selection.js        # Tenant-scoped Set-based selection store
 │       │   ├── triage.js           # Queue scroll memory, detail version guard
 │       │   ├── navigation.js       # Cross-page query memory per destination
+│       │   ├── sidebar.js          # Desktop sidebar collapse preference
 │       │   └── workspace.js        # Health probe state
 │       ├── ui/primitives.js        # esc(), icon(), severity(), formatTime(), emptyState()
 │       └── features/
 │           ├── triage/             # model.js (intelSummary, renderQueue), view.js
 │           ├── incidents/          # model.js, render.js, state.js, view.js, workspace.js
 │           ├── imports/            # model.js, render.js, view.js
-│           └── reports/            # model.js, render.js, view.js
+│           ├── reports/            # model.js, render.js, view.js
+│           └── settings/           # model.js, view.js (Wazuh Indexer + realtime)
 ```
 
 ## Four destinations (not a monolithic page)
@@ -70,6 +72,7 @@ app/
 | `#/incidents/:id` | Case editor: evidence grouping, analysis, conclusion, recommendation |
 | `#/imports` | Paste or upload new Wazuh JSON exports |
 | `#/reports` | Scoped export to CSV, JSON, clipboard HTML, .docx, .xlsx |
+| `#/settings` | Wazuh Indexer connection, realtime monitor, sidebar preference |
 
 There is **no overview dashboard**. Triage is the entry point.
 
@@ -87,27 +90,23 @@ There is **no overview dashboard**. Triage is the entry point.
 4. **Export scope consistency**: `scopeParams()` strips pagination and enforces same filters for all export formats.
 5. **Intel labels**: Use "Belum ada cache" / "Tidak ada deteksi" / scored value. Never "Clean" or "Aman".
 6. **Redaction disclaimer**: "Versi tersamarkan—tinjau sebelum dibagikan", not "Aman".
+7. **Credentials at rest**: Wazuh Indexer password and the Remote database URI are encrypted locally (`app/secure_store.py`). The key comes from `ARBITER_SECRET_KEY` / `ARBITER_SECRET_KEY_FILE` or an auto-generated 0600 file outside the repo. Never commit a key or plaintext credential.
 
 ## Privacy — STRICT
 
 - **NEVER** read `.env`, production database, real alert records, raw logs, or live UI on port 8000.
 - **NEVER** run `tests.test_api` against the active database — it expects live PostgreSQL with real data.
-- All development and QA uses synthetic fixtures only.
-- Use `python -m tests.serve_synthetic_ui` (port 8767) for browser QA.
-- Use isolated test suites: `tests.test_ui_api`, `tests.test_ui_safety`, `tests.test_parser`, `tests.test_exports`, `tests.test_privacy`, `tests.test_dedup`.
+- All development and QA uses synthetic fixtures inside the isolated test suites only.
+- Use isolated test suites: `tests.test_ui_api`, `tests.test_ui_safety`, `tests.test_parser`, `tests.test_exports`, `tests.test_privacy`, `tests.test_dedup`, `tests.test_settings`.
 
 ## Running tests
 
 ```bash
-# Frontend (44 tests)
+# Frontend (125 tests)
 node --test tests/frontend/*.test.mjs
 
-# Backend - SAFE isolated suites only (61 tests)
-.venv/bin/python -m unittest tests.test_parser tests.test_exports tests.test_privacy tests.test_dedup tests.test_ui_api tests.test_ui_safety -q
-
-# Synthetic browser QA server (NOT production)
-.venv/bin/python -m tests.serve_synthetic_ui
-# → http://127.0.0.1:8767
+# Backend - SAFE isolated suites only (92 tests)
+.venv/bin/python -m unittest tests.test_parser tests.test_exports tests.test_privacy tests.test_dedup tests.test_ui_api tests.test_ui_safety tests.test_settings -q
 
 # Design system lint
 npx -y @google/design.md@0.4.0 lint docs/ui-ux-redesign/DESIGN.md

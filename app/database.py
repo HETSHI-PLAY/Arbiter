@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS wazuh.alert_group_members (
     PRIMARY KEY(alert_pk, group_id)
 );
 
+CREATE TABLE IF NOT EXISTS wazuh.app_settings (
+    key TEXT PRIMARY KEY,
+    value JSONB NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- Fallback mock table for public.ip_intel_cache so open-source users without IP Intel don't crash
 CREATE TABLE IF NOT EXISTS public.ip_intel_cache (
     ip TEXT PRIMARY KEY,
@@ -106,6 +112,7 @@ _profile_lock = threading.RLock()
 _preview_registry: dict[str, dict[str, Any]] = {}
 PREVIEW_TOKEN_TTL = 60.0
 MAX_PREVIEW_REGISTRY_SIZE = 500
+PROFILE_DOC_KEY = "db_profiles"
 
 
 def _clean_expired_previews_locked(now: float) -> None:
@@ -235,6 +242,53 @@ def set_active_profile(profile_id: str) -> dict[str, Any]:
         return get_active_profile()
 
 
+def _persist_profile_overrides() -> bool:
+    """Store the Remote profile URL encrypted in the local workspace database."""
+    try:
+        from app.settings import save_document
+        from app.secure_store import encrypt_text
+
+        conn = get_db_connection("local")
+    except Exception:
+        return False
+    try:
+        remote_url = str(_db_profiles.get("remote", {}).get("url") or "")
+        save_document(conn, PROFILE_DOC_KEY, {"remote_url_enc": encrypt_text(remote_url)})
+        conn.commit()
+        return True
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _load_profile_overrides(conn) -> None:
+    """Restore an encrypted Remote profile URL saved by a previous session."""
+    try:
+        from app.settings import load_document
+        from app.secure_store import decrypt_text
+
+        document = load_document(conn, PROFILE_DOC_KEY, None)
+        if not isinstance(document, dict):
+            return
+        encrypted = str(document.get("remote_url_enc") or "")
+        if not encrypted:
+            return
+        url = decrypt_text(encrypted)
+        if url.startswith("postgresql://") or url.startswith("postgres://"):
+            _db_profiles["remote"]["url"] = url
+    except Exception:
+        # Missing key or legacy data must not block startup.
+        return
+
+
 def update_profile_url(profile_id: str, new_url: str) -> dict[str, Any]:
     if profile_id not in _db_profiles:
         raise HTTPException(status_code=400, detail=f"Database profile '{profile_id}' not found.")
@@ -244,7 +298,10 @@ def update_profile_url(profile_id: str, new_url: str) -> dict[str, Any]:
     if unquote(urlparse(new_url).password or "") == "***":
         raise HTTPException(status_code=400, detail="Masked URI is display-only. Enter a complete replacement URI.")
     _db_profiles[profile_id]["url"] = new_url
-    return get_active_profile()
+    persisted = _persist_profile_overrides() if profile_id != "local" else True
+    result = get_active_profile()
+    result["persisted"] = persisted
+    return result
 
 
 def test_db_connection(url: str | None = None, *, profile_id: str | None = None) -> dict[str, Any]:
@@ -507,6 +564,7 @@ def init_database() -> None:
     """Executes schema migrations and ensures indices exist."""
     with get_db() as conn:
         conn.execute(SCHEMA_SQL)
+        _load_profile_overrides(conn)
 
 
 def ingest_alert_with_dedup(conn: psycopg.Connection, a: dict[str, Any]) -> tuple[bool, bool]:

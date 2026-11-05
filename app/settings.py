@@ -1,0 +1,339 @@
+"""Workspace settings: Wazuh Indexer connection and realtime monitor preferences.
+
+Settings are stored locally in PostgreSQL (``wazuh.app_settings``) and are never
+sent to a remote service. Secrets are stored server-side only and are redacted
+from every API response.
+"""
+
+from __future__ import annotations
+
+import base64
+import copy
+import json
+import re
+import ssl
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+from app.secure_store import SecretStoreError, decrypt_text, encrypt_text, is_encrypted
+
+SETTINGS_KEY = "app"
+MIN_RULE_LEVEL = 7
+
+DEFAULT_SETTINGS: dict[str, Any] = {
+    "wazuh": {
+        "enabled": False,
+        "indexer_url": "",
+        "username": "",
+        "index_pattern": "wazuh-alerts-*",
+        "verify_tls": True,
+    },
+    "realtime": {
+        "enabled": False,
+        "interval_seconds": 30,
+    },
+    "ai": {
+        "enabled": False,
+        "base_url": "http://127.0.0.1:11434",
+        "model": "hf.co/XHToken/Spark-X2.6-4B-GGUF:Q4_K_M",
+        "timeout_seconds": 90,
+    },
+    "ui": {
+        "sidebar_default": "expanded",
+    },
+}
+
+_SIDEBAR_VALUES = {"expanded", "collapsed"}
+_INDEX_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._*,-]*$")
+_URL = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
+
+
+def default_settings() -> dict[str, Any]:
+    return copy.deepcopy(DEFAULT_SETTINGS)
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _boolean(value: Any, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value in (0, 1):
+        return bool(value)
+    raise ValueError(f"{field} harus berupa boolean (true/false).")
+
+
+def _text(value: Any, field: str, limit: int = 500) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, (str, int, float)):
+        raise ValueError(f"{field} tidak valid.")
+    text = str(value).strip()
+    if len(text) > limit:
+        raise ValueError(f"{field} terlalu panjang (maksimal {limit} karakter).")
+    return text
+
+
+def validate_settings(payload: dict[str, Any], current: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Validate a partial settings payload and merge it over ``current``."""
+    if not isinstance(payload, dict):
+        raise ValueError("Payload pengaturan tidak valid.")
+    base = _deep_merge(default_settings(), current or {})
+    settings = _deep_merge(base, payload)
+
+    wazuh = settings.get("wazuh")
+    if not isinstance(wazuh, dict):
+        raise ValueError("Bagian wazuh tidak valid.")
+    url = _text(wazuh.get("indexer_url"), "wazuh.indexer_url")
+    if url and not _URL.match(url):
+        raise ValueError("URL Wazuh Indexer harus diawali http:// atau https:// dan tanpa spasi.")
+    wazuh["indexer_url"] = url.rstrip("/")
+    wazuh["username"] = _text(wazuh.get("username"), "wazuh.username", 200)
+    wazuh["index_pattern"] = _text(wazuh.get("index_pattern"), "wazuh.index_pattern", 200) or "wazuh-alerts-*"
+    if not _INDEX_PATTERN.match(wazuh["index_pattern"]):
+        raise ValueError("Pola indeks hanya boleh berisi huruf, angka, titik, garis bawah, tanda hubung, koma, dan bintang.")
+    wazuh["verify_tls"] = _boolean(wazuh.get("verify_tls", True), "wazuh.verify_tls")
+    wazuh["enabled"] = _boolean(wazuh.get("enabled", False), "wazuh.enabled")
+    password = wazuh.pop("password", None)
+    if password is not None:
+        if not isinstance(password, str):
+            raise ValueError("wazuh.password tidak valid.")
+        if len(password) > 500:
+            raise ValueError("wazuh.password terlalu panjang.")
+        # Never keep plaintext in the settings document; store local ciphertext.
+        wazuh["password_enc"] = encrypt_text(password) if password else ""
+    wazuh.setdefault("password_enc", "")
+    if not isinstance(wazuh["password_enc"], str):
+        raise ValueError("wazuh.password_enc tidak valid.")
+
+    realtime = settings.get("realtime")
+    if not isinstance(realtime, dict):
+        raise ValueError("Bagian realtime tidak valid.")
+    realtime["enabled"] = _boolean(realtime.get("enabled", False), "realtime.enabled")
+    try:
+        interval = int(realtime.get("interval_seconds", 30))
+    except (TypeError, ValueError):
+        raise ValueError("realtime.interval_seconds harus berupa angka.") from None
+    if not 10 <= interval <= 300:
+        raise ValueError("Interval realtime harus antara 10 dan 300 detik.")
+    realtime["interval_seconds"] = interval
+
+    ai = settings.get("ai")
+    if not isinstance(ai, dict):
+        raise ValueError("Bagian ai tidak valid.")
+    ai["enabled"] = _boolean(ai.get("enabled", False), "ai.enabled")
+    base_url = _text(ai.get("base_url"), "ai.base_url", 300) or "http://127.0.0.1:11434"
+    parsed = urllib.parse.urlparse(base_url)
+    if parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError("AI lokal hanya boleh memakai http://localhost atau IP loopback.")
+    ai["base_url"] = base_url.rstrip("/")
+    ai["model"] = _text(ai.get("model"), "ai.model", 200) or DEFAULT_SETTINGS["ai"]["model"]
+    try:
+        ai_timeout = int(ai.get("timeout_seconds", 90))
+    except (TypeError, ValueError):
+        raise ValueError("ai.timeout_seconds harus berupa angka.") from None
+    if not 10 <= ai_timeout <= 180:
+        raise ValueError("Timeout AI harus antara 10 dan 180 detik.")
+    ai["timeout_seconds"] = ai_timeout
+
+    ui = settings.get("ui")
+    if not isinstance(ui, dict):
+        raise ValueError("Bagian ui tidak valid.")
+    sidebar = _text(ui.get("sidebar_default"), "ui.sidebar_default", 20) or "expanded"
+    if sidebar not in _SIDEBAR_VALUES:
+        raise ValueError("ui.sidebar_default harus expanded atau collapsed.")
+    ui["sidebar_default"] = sidebar
+
+    return settings
+
+
+def redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    """Return a client-safe view; passwords never leave the server."""
+    result = copy.deepcopy(settings)
+    wazuh = result.setdefault("wazuh", {})
+    password_enc = wazuh.pop("password_enc", "") or ""
+    wazuh.pop("password", None)
+    wazuh.pop("_legacy_plaintext", None)
+    wazuh["password_set"] = bool(password_enc)
+    wazuh["auth_configured"] = bool(result["wazuh"].get("indexer_url"))
+    return result
+
+
+def load_document(conn, key: str, default: Any = None) -> Any:
+    """Read one local JSON document from wazuh.app_settings."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM wazuh.app_settings WHERE key = %s", (key,)
+        ).fetchone()
+    except Exception:
+        return default
+    if not row:
+        return default
+    value = row["value"] if isinstance(row, dict) else row[0]
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return default
+    return value if value is not None else default
+
+
+def save_document(conn, key: str, value: Any) -> None:
+    conn.execute(
+        """
+        INSERT INTO wazuh.app_settings (key, value, updated_at)
+        VALUES (%s, %s::jsonb, now())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+        """,
+        (key, json.dumps(value)),
+    )
+
+
+def load_settings(conn) -> dict[str, Any]:
+    """Load stored settings; missing rows fall back to defaults.
+
+    Legacy plaintext passwords are converted to local ciphertext in memory and
+    flagged so the caller can migrate them on the next write.
+    """
+    value = load_document(conn, SETTINGS_KEY, None)
+    if not isinstance(value, dict):
+        return default_settings()
+    stored = value.get("wazuh")
+    legacy_password = ""
+    if isinstance(stored, dict):
+        legacy_password = stored.pop("password", "") or ""
+    try:
+        settings = validate_settings(value, default_settings())
+    except ValueError:
+        return default_settings()
+    wazuh = settings["wazuh"]
+    if legacy_password:
+        if is_encrypted(legacy_password):
+            wazuh["password_enc"] = legacy_password
+        else:
+            wazuh["password_enc"] = encrypt_text(legacy_password)
+            wazuh["_legacy_plaintext"] = True
+    return settings
+
+
+def migrate_settings(conn) -> bool:
+    """Encrypt a legacy plaintext password if one is still stored."""
+    settings = load_settings(conn)
+    if not settings.get("wazuh", {}).get("_legacy_plaintext"):
+        return False
+    settings["wazuh"].pop("_legacy_plaintext", None)
+    save_settings(conn, settings)
+    return True
+
+
+def save_settings(conn, settings: dict[str, Any]) -> dict[str, Any]:
+    payload = copy.deepcopy(settings)
+    wazuh = payload.setdefault("wazuh", {})
+    wazuh.pop("password", None)
+    wazuh.pop("_legacy_plaintext", None)
+    password_enc = wazuh.get("password_enc", "") or ""
+    if password_enc and not is_encrypted(password_enc):
+        # Defensive: never persist plaintext, even if a caller bypassed validation.
+        wazuh["password_enc"] = encrypt_text(password_enc)
+    save_document(conn, SETTINGS_KEY, payload)
+    return payload
+
+
+def wazuh_password(settings: dict[str, Any]) -> str:
+    """Decrypt the stored password in memory only; never log or return it."""
+    wazuh = settings.get("wazuh", {})
+    encrypted = str(wazuh.get("password_enc") or "")
+    if not encrypted:
+        return ""
+    try:
+        return decrypt_text(encrypted)
+    except SecretStoreError:
+        return ""
+
+
+def wazuh_alert_query(min_rule_level: int = MIN_RULE_LEVEL) -> dict[str, Any]:
+    """Scope used for every Wazuh Indexer read: Medium severity and above.
+
+    Wazuh maps ``rule.level`` 7-9 to Medium, 10-11 to High, 12-15 to Critical.
+    """
+    return {"query": {"range": {"rule.level": {"gte": int(min_rule_level)}}}}
+
+
+def test_wazuh_connection(
+    *,
+    indexer_url: str,
+    username: str,
+    password: str,
+    index_pattern: str,
+    verify_tls: bool,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Probe the Wazuh Indexer with a single scoped count request."""
+    base = str(indexer_url or "").strip().rstrip("/")
+    if not base or not _URL.match(base):
+        raise ValueError("URL Wazuh Indexer belum diatur atau tidak valid.")
+    pattern = str(index_pattern or "wazuh-alerts-*").strip()
+    if not _INDEX_PATTERN.match(pattern):
+        raise ValueError("Pola indeks tidak valid.")
+    target = f"{base}/{urllib.parse.quote(pattern, safe='*-._,')}/_count"
+    body = json.dumps(wazuh_alert_query()).encode("utf-8")
+    request = urllib.request.Request(
+        target,
+        data=body,
+        method="POST",
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+    )
+    if username:
+        token = base64.b64encode(f"{username}:{password}".encode()).decode()
+        request.add_header("Authorization", f"Basic {token}")
+
+    context = None
+    if target.lower().startswith("https://"):
+        context = ssl.create_default_context()
+        if not verify_tls:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        *([urllib.request.HTTPSHandler(context=context)] if context else []),
+    )
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            body = response.read(1024 * 1024)
+            status = response.status
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise ValueError("Autentikasi Wazuh Indexer ditolak. Periksa username dan password.") from None
+        if error.code == 404:
+            raise ValueError("Indeks tidak ditemukan. Periksa pola indeks Wazuh.") from None
+        raise ValueError(f"Wazuh Indexer menolak permintaan (HTTP {error.code}).") from None
+    except urllib.error.URLError as error:
+        reason = str(getattr(error, "reason", ""))
+        if isinstance(getattr(error, "reason", None), ssl.SSLError) or "certificate" in reason.lower():
+            raise ValueError("TLS gagal diverifikasi. Periksa sertifikat atau matikan verifikasi TLS untuk lab lokal.") from None
+        raise ValueError("Tidak dapat terhubung ke Wazuh Indexer. Periksa URL dan jaringan.") from None
+    except TimeoutError:
+        raise ValueError("Koneksi ke Wazuh Indexer melebihi batas waktu.") from None
+
+    try:
+        parsed = json.loads(body.decode("utf-8") or "{}")
+    except ValueError:
+        raise ValueError("Respons Wazuh Indexer bukan JSON yang valid.") from None
+    count = parsed.get("count") if isinstance(parsed, dict) else None
+    return {
+        "ok": True,
+        "status": status,
+        "count": int(count) if isinstance(count, (int, float)) else None,
+        "index_pattern": pattern,
+        "min_rule_level": MIN_RULE_LEVEL,
+    }

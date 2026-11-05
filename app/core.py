@@ -198,7 +198,7 @@ class LocalAIUnavailable(RuntimeError):
     """Local inference endpoint failed or returned an unusable response."""
 
 
-def ollama_request(prompt: str, model: str, base_url: str) -> str:
+def ollama_request(prompt: str, model: str, base_url: str, timeout: float = 12) -> str:
     """Invokes ONLY a loopback Ollama endpoint; remote/cloud hosts are strictly refused."""
     from urllib.parse import urlparse
     from urllib.request import Request, urlopen
@@ -214,7 +214,7 @@ def ollama_request(prompt: str, model: str, base_url: str) -> str:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=12) as response:
+        with urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
         raise LocalAIUnavailable(f"Local AI is unavailable: {exc}") from exc

@@ -3,6 +3,7 @@ import {json} from './api/client.js';
 import {createSelection} from './state/selection.js';
 import {probeConnection} from './state/workspace.js';
 import {createNavigationMemory} from './state/navigation.js';
+import {normalizeSidebarState,readSidebarState,writeSidebarState,toggleSidebarState} from './state/sidebar.js';
 import {tenantScope, tenantValues} from './state/scope.js';
 import {esc, icon, emptyState, errorState, loadingRows} from './ui/primitives.js';
 
@@ -17,9 +18,11 @@ const selection=createSelection(routeScope(new URLSearchParams(location.hash.spl
 let currentRoute, controller, cleanup, guard=null, notifyTimer, healthPending=false, lastHealth=null, routeVersion=0;
 const scrollPositions=new Map();
 let navigationMemory=createNavigationMemory();
-const pageTitles={triage:'Triage',stats:'Statistik',incidents:'Insiden',imports:'Impor',reports:'Laporan',database:'Database'};
+const pageTitles={triage:'Triage',stats:'Statistik',incidents:'Insiden',imports:'Impor',reports:'Laporan',realtime:'Realtime', 'ai-triage':'AI Triage',database:'Database',settings:'Pengaturan'};
 for(const el of document.querySelectorAll('[data-icon]'))el.innerHTML=icon(el.dataset.icon);
 document.querySelector('#open-navigation').innerHTML=icon('menu');
+document.querySelector('#toggle-sidebar').innerHTML=icon('menu');
+document.querySelector('#realtime-toggle').innerHTML=icon('pulse');
 document.querySelector('#close-navigation').innerHTML=icon('close');
 document.querySelector('#refresh-workspace').innerHTML=icon('refresh');
 document.querySelector('[data-close-dialog]').innerHTML=icon('close');
@@ -135,10 +138,58 @@ function openNav(){sidebar.classList.add('is-open');scrim.classList.add('is-open
 function closeNav(restore=true){const wasOpen=sidebar.classList.contains('is-open');sidebar.classList.remove('is-open');scrim.classList.remove('is-open');document.querySelector('#open-navigation').setAttribute('aria-expanded','false');document.querySelector('#workspace').inert=false;if(wasOpen&&restore)document.querySelector('#open-navigation').focus();}
 document.querySelector('#open-navigation').addEventListener('click',openNav);
 document.querySelector('#close-navigation').addEventListener('click',()=>closeNav());scrim.addEventListener('click',()=>closeNav());
+const shell=document.querySelector('.app-shell'),sidebarToggle=document.querySelector('#toggle-sidebar');
+const sidebarStorage=(()=>{try{return window.localStorage;}catch{return null;}})();
+let sidebarState=readSidebarState(sidebarStorage);
+function setSidebarState(next,persist=true){
+  sidebarState=normalizeSidebarState(next);
+  const collapsed=sidebarState==='collapsed';
+  shell.classList.toggle('is-sidebar-collapsed',collapsed);
+  const label=collapsed?'Tampilkan navigasi':'Sembunyikan navigasi';
+  sidebarToggle.setAttribute('aria-expanded',String(!collapsed));
+  sidebarToggle.setAttribute('aria-label',label);
+  sidebarToggle.title=label;
+  if(persist)writeSidebarState(sidebarStorage,sidebarState);
+  if(collapsed)closeNav(false);
+}
+sidebarToggle.addEventListener('click',()=>setSidebarState(toggleSidebarState(sidebarState)));
+setSidebarState(sidebarState,false);
+const realtimeToggle=document.querySelector('#realtime-toggle');
+let realtimeState={enabled:false,interval_seconds:30};
+function paintRealtime(){
+  const enabled=Boolean(realtimeState.enabled);
+  realtimeToggle.setAttribute('aria-pressed',String(enabled));
+  const label=enabled?`Monitor realtime: siap setiap ${realtimeState.interval_seconds} detik`:'Monitor realtime: nonaktif';
+  realtimeToggle.setAttribute('aria-label',label);
+  realtimeToggle.title=label;
+}
+function applyWorkspaceSettings(settings,applySidebarDefault=false){
+  const realtime=settings?.realtime||{};
+  realtimeState={enabled:Boolean(realtime.enabled),interval_seconds:Number(realtime.interval_seconds)||30};
+  paintRealtime();
+  if(applySidebarDefault&&['expanded','collapsed'].includes(settings?.ui?.sidebar_default))setSidebarState(settings.ui.sidebar_default);
+}
+async function loadWorkspaceSettings(){
+  try{const body=await json('/api/settings',{timeout:10000});applyWorkspaceSettings(body.settings);}
+  catch{/* Settings are optional; header keeps its safe defaults. */}
+}
+realtimeToggle.addEventListener('click',async e=>{
+  const button=e.currentTarget,next=!realtimeState.enabled;
+  button.disabled=true;
+  try{
+    const body=await json('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({realtime:{enabled:next,interval_seconds:realtimeState.interval_seconds}}) });
+    applyWorkspaceSettings(body.settings);
+    notify(next?`Monitor realtime disiapkan setiap ${realtimeState.interval_seconds} detik. Pengambilan Wazuh menyusul.`:'Monitor realtime dimatikan.',next?'success':'info');
+    window.dispatchEvent(new CustomEvent('arbiter:realtime-changed',{detail:realtimeState}));
+  }catch(error){notify(error.message,'error');}
+  finally{button.disabled=false;}
+});
+window.addEventListener('arbiter:settings-saved',event=>{applyWorkspaceSettings(event.detail,true);});
+window.addEventListener('arbiter:realtime-changed',event=>{if(event.detail){realtimeState={enabled:Boolean(event.detail.enabled),interval_seconds:Number(event.detail.interval_seconds)||30};paintRealtime();}});
 sidebar.addEventListener('keydown',e=>{if(e.key==='Escape')closeNav();if(e.key==='Tab'&&sidebar.classList.contains('is-open')){const focusable=[...sidebar.querySelectorAll('a,button')].filter(el=>el.getClientRects().length);const first=focusable[0],last=focusable.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}});
 const help=document.querySelector('#help-dialog');document.querySelector('#help-button').addEventListener('click',()=>help.showModal());help.querySelector('[data-close-dialog]').addEventListener('click',()=>help.close());
 document.querySelector('.skip-link').addEventListener('click',e=>{e.preventDefault();main.focus();});
 window.addEventListener('beforeunload',e=>{if(guard&&!guard()){e.preventDefault();e.returnValue='';}});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)health();});
 window.addEventListener('online',health);window.addEventListener('offline',health);
-router.start();health();tenants();setInterval(health,15000);
+router.start();health();tenants();loadWorkspaceSettings();setInterval(health,15000);

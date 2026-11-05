@@ -4,6 +4,14 @@ set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
+# Load .env (never committed) so local runs match docker compose behaviour.
+if [ -f "$DIR/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$DIR/.env"
+    set +a
+fi
+
 PORT="${PORT:-8000}"
 HOST="${HOST:-127.0.0.1}"
 

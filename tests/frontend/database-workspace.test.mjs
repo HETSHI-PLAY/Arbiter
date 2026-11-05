@@ -6,14 +6,15 @@ import {createSelection} from '../../app/static/js/state/selection.js';
 import {createNavigationMemory} from '../../app/static/js/state/navigation.js';
 import {parseRoute, withParams} from '../../app/static/js/router.js';
 import {tenantScope, tenantValues} from '../../app/static/js/state/scope.js';
+import {normalizeSidebarState, readSidebarState, writeSidebarState, toggleSidebarState} from '../../app/static/js/state/sidebar.js';
 
 // Execute the real shell without booting feature mounts, timers or networking.
-const source=readFileSync(new URL('../../app/static/js/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replace('router.start();health();tenants();setInterval(health,15000);','');
+const source=readFileSync(new URL('../../app/static/js/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'').replace('router.start();health();tenants();loadWorkspaceSettings();setInterval(health,15000);','');
 function shell(){
   const nodes=new Map(), links=['triage','incidents'].map(page=>({dataset:{page},href:''}));
-  const node=()=>({innerHTML:'',textContent:'',title:'',dataset:{},elements:{all:{}},classList:{contains:()=>false,remove(){}},addEventListener(){},querySelectorAll:()=>[],querySelector:()=>node(),close(){}});
+  const node=()=>({innerHTML:'',textContent:'',title:'',dataset:{},elements:{all:{}},classList:{contains:()=>false,remove(){},add(){},toggle(){}},setAttribute(){},addEventListener(){},querySelectorAll:()=>[],querySelector:()=>node(),close(){}});
   const location={hash:'#/database?tenant=Old&alert=21'}, replaced=[];
-  const context=vm.createContext({URLSearchParams,Map,Set,AbortController,createSelection,createNavigationMemory,tenantScope,tenantValues,withParams,parseRoute,location,history:{replaceState(a,b,hash){location.hash=hash;replaced.push(hash);}},window:{addEventListener(){},dispatchEvent(){}},Event,document:{addEventListener(){},querySelector(selector){if(!nodes.has(selector))nodes.set(selector,node());return nodes.get(selector);},querySelectorAll:selector=>selector==='.nav-link'?links:[]},icon:()=>'',esc:String,createRouter:()=>({}),json:async()=>({tenants:[]}),clearTimeout(){},setTimeout(){}});
+  const context=vm.createContext({URLSearchParams,Map,Set,AbortController,createSelection,createNavigationMemory,tenantScope,tenantValues,normalizeSidebarState,readSidebarState,writeSidebarState,toggleSidebarState,withParams,parseRoute,location,history:{replaceState(a,b,hash){location.hash=hash;replaced.push(hash);}},window:{addEventListener(){},dispatchEvent(){}},Event,document:{addEventListener(){},querySelector(selector){if(!nodes.has(selector))nodes.set(selector,node());return nodes.get(selector);},querySelectorAll:selector=>selector==='.nav-link'?links:[]},icon:()=>'',esc:String,createRouter:()=>({}),json:async()=>({tenants:[]}),clearTimeout(){},setTimeout(){}});
   vm.runInContext(source,context);
   return {context,nodes,links,replaced,run:code=>vm.runInContext(code,context)};
 }
