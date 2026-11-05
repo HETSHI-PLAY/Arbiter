@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS wazuh.analysis_groups (
     status TEXT NOT NULL DEFAULT 'open',
     severity TEXT NOT NULL DEFAULT 'medium',
     source TEXT NOT NULL DEFAULT 'human',
+    verdict TEXT NOT NULL DEFAULT 'needs_review',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

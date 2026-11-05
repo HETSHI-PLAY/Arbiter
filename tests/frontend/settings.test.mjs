@@ -16,11 +16,13 @@ test('settings model normalizes partial payloads and enforces safe bounds', asyn
   assert.equal(merged.wazuh.enabled, true);
   assert.equal(merged.realtime.interval_seconds, 30, 'out-of-range interval falls back to 30');
   assert.equal(merged.ui.sidebar_default, 'expanded', 'unknown sidebar preference falls back');
-  assert.match(realtimeLabel(merged), /siap setiap 30 detik/);
+  assert.match(realtimeLabel(merged), /pull setiap 30 detik/);
   assert.match(wazuhSummary(merged), /wazuh-alerts-\*/);
 
   assert.match(wazuhSummary(normalizeSettings(null)), /belum dikonfigurasi/i);
   assert.match(realtimeLabel(normalizeSettings(null)), /nonaktif/);
+  // Daily mode labels distinctly from interval mode.
+  assert.match(realtimeLabel({realtime: {enabled: true, mode: 'daily'}}), /24 jam/);
 });
 
 test('settings page exposes Wazuh Indexer credentials, realtime, and sidebar preference', () => {

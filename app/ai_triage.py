@@ -98,57 +98,128 @@ def heuristic_triage(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return groups
 
 
-def _prompt(alerts: list[dict[str, Any]]) -> str:
+def _cluster_alerts(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stage 1 — deterministic grouping (no LLM, no network).
+
+    Reuses ``suggest_groups`` (rule_id + source_ip / agent / CVE / log_signature)
+    to collapse N alerts into K clusters, then attaches sanitized summary fields
+    that are safe to send to the model. Unmatched alerts become singleton clusters.
+    """
+    by_id = {str(a.get("id") or a.get("alert_id")): a for a in alerts}
+    clusters: list[dict[str, Any]] = []
+    covered: set[str] = set()
+    for group in suggest_groups(alerts):
+        # Priority order (source+rule > agent+rule > CVE > signature): keep each
+        # alert in only its first matching cluster so the model never sees the
+        # same alert classified twice.
+        ids = [str(item) for item in group.get("alert_ids", []) if str(item) in by_id and str(item) not in covered]
+        if not ids:
+            continue
+        covered.update(ids)
+        members = [by_id[i] for i in ids]
+        source_ips = sorted({str(a.get("source_ip") or "") for a in members if a.get("source_ip")})
+        agent_names = sorted({str(a.get("agent_name") or "") for a in members if a.get("agent_name") and a.get("agent_name") != "-"})
+        clusters.append({
+            "alert_ids": ids,
+            "title": str(group.get("title") or "Cluster")[:200],
+            "category": str(group.get("category") or "")[:120],
+            "rule_id": str(group.get("rule_id") or "")[:80],
+            "rule_level": int(group.get("rule_level") or 0),
+            "description": str(group.get("description") or "")[:300],
+            "source_ips": source_ips[:8],
+            "agent_names": agent_names[:8],
+            "alert_count": len(ids),
+            "total_hits": int(group.get("total_hits") or 0),
+        })
+    for alert_id, alert in by_id.items():
+        if alert_id in covered:
+            continue
+        clusters.append({
+            "alert_ids": [alert_id],
+            "title": str(alert.get("description") or f"Alert {alert_id}")[:200],
+            "category": "Tunggal",
+            "rule_id": str(alert.get("rule_id") or "")[:80],
+            "rule_level": int(alert.get("rule_level") or 0),
+            "description": str(alert.get("description") or "")[:300],
+            "source_ips": [str(alert.get("source_ip"))] if alert.get("source_ip") else [],
+            "agent_names": [str(alert.get("agent_name"))] if alert.get("agent_name") else [],
+            "alert_count": 1,
+            "total_hits": int(alert.get("hit_count") or 1),
+        })
+    return clusters
+
+
+def _cluster_prompt(clusters: list[dict[str, Any]]) -> str:
+    """Build a compact prompt: one sanitized summary per cluster, indexed.
+
+    The model never sees alert ids or raw logs — it classifies by cluster index,
+    so hallucinated ids are structurally impossible to feed back.
+    """
+    payload = [
+        {
+            "index": index,
+            "rule_id": cluster["rule_id"],
+            "rule_level": cluster["rule_level"],
+            "description": cluster["description"],
+            "source_ips": cluster["source_ips"],
+            "agent_names": cluster["agent_names"],
+            "alert_count": cluster["alert_count"],
+            "total_hits": cluster["total_hits"],
+        }
+        for index, cluster in enumerate(clusters)
+    ]
     return (
-        "You are a SOC triage assistant working fully offline. Classify and group the alerts below. "
-        "Use ONLY the provided alert ids. Do not invent facts, hosts, or IPs. A false positive means the "
-        "activity is expected/benign (for example routine administrative noise). Use needs_review when the "
-        "evidence is insufficient. Return STRICT JSON with this shape: "
-        '{"groups":[{"category":string,"title":string,"verdict":"tp"|"fp"|"needs_review",'
-        '"reason":string,"alert_ids":[string,...]}]}. '
-        "Every alert must appear in at least one group. Keep reasons under 240 characters. Alerts: "
-        + json.dumps(alerts, ensure_ascii=False)
+        "You are a SOC triage assistant working fully offline. Each item below is a cluster of similar "
+        "alerts already grouped by rule_id, source IP, CVE, or log signature. Do not regroup them. "
+        "Classify each cluster as tp (true positive: real suspicious activity), fp (false positive: "
+        "expected/benign, e.g. routine administrative noise), or needs_review (insufficient evidence). "
+        "Use ONLY the cluster data; do not invent facts, hosts, IPs, or ids. Return STRICT JSON: "
+        '{"verdicts":[{"index":int,"verdict":"tp"|"fp"|"needs_review","reason":string}]}. '
+        "One verdict per cluster, same indices as input. Keep reasons under 240 characters. Clusters: "
+        + json.dumps(payload, ensure_ascii=False)
     )
 
 
-def _validate_ai_groups(value: Any, alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    if not isinstance(value, dict) or not isinstance(value.get("groups"), list):
-        raise LocalAIUnavailable("Model AI tidak mengembalikan struktur grup yang valid.")
-    valid_ids = {str(a.get("id")) for a in alerts}
-    seen: set[str] = set()
-    groups = []
-    for item in value["groups"]:
-        if not isinstance(item, dict) or not isinstance(item.get("alert_ids"), list):
+def _validate_cluster_verdicts(value: Any, clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not isinstance(value, dict) or not isinstance(value.get("verdicts"), list):
+        raise LocalAIUnavailable("Model AI tidak mengembalikan struktur verdict yang valid.")
+    by_index = {index: cluster for index, cluster in enumerate(clusters)}
+    groups: list[dict[str, Any]] = []
+    seen_indexes: set[int] = set()
+    for item in value["verdicts"]:
+        if not isinstance(item, dict):
             continue
-        ids = []
-        for raw in item["alert_ids"]:
-            alert_id = str(raw)
-            if alert_id in valid_ids and alert_id not in seen:
-                ids.append(alert_id)
-                seen.add(alert_id)
-        if not ids:
+        try:
+            index = int(item.get("index"))
+        except (TypeError, ValueError):
             continue
+        cluster = by_index.get(index)
+        if cluster is None or index in seen_indexes:
+            continue
+        seen_indexes.add(index)
         verdict = str(item.get("verdict") or "needs_review").strip().lower()
         if verdict not in VERDICTS:
             verdict = "needs_review"
         groups.append({
-            "category": str(item.get("category") or "AI lokal")[:120],
-            "title": str(item.get("title") or "Kelompok AI lokal")[:200],
+            "category": cluster["category"] or "AI lokal",
+            "title": cluster["title"] or f"Cluster {index}",
             "verdict": verdict,
             "reason": str(item.get("reason") or "Tanpa alasan dari model.")[:400],
-            "alert_ids": ids,
+            "alert_ids": cluster["alert_ids"],
         })
-    missing = [alert_id for alert_id in valid_ids if alert_id not in seen]
-    if missing:
+    # Any cluster the model skipped still needs a verdict.
+    for index, cluster in enumerate(clusters):
+        if index in seen_indexes:
+            continue
         groups.append({
-            "category": "Belum dikelompokkan",
-            "title": "Alert yang belum diklasifikasikan model",
+            "category": cluster["category"] or "Belum diklasifikasikan",
+            "title": cluster["title"] or f"Cluster {index}",
             "verdict": "needs_review",
-            "reason": "Model tidak menempatkan alert ini pada grup mana pun; tinjau manual.",
-            "alert_ids": missing,
+            "reason": "Model tidak mengembalikan verdict untuk cluster ini; tinjau manual.",
+            "alert_ids": cluster["alert_ids"],
         })
     if not groups:
-        raise LocalAIUnavailable("Model AI tidak menghasilkan grup yang dapat dipakai.")
+        raise LocalAIUnavailable("Model AI tidak menghasilkan verdict yang dapat dipakai.")
     return groups
 
 
@@ -159,15 +230,20 @@ def ai_triage(
     base_url: str,
     timeout: float = 90,
 ) -> list[dict[str, Any]]:
-    safe = safe_alerts(alerts)
-    if not safe:
+    """Two-stage triage: deterministic clustering, then LLM classification per cluster.
+
+    The model receives only sanitized cluster summaries (rule_id, level, description,
+    IP/host lists, counts) — never raw logs, ``data``, ``full_log``, or alert ids.
+    """
+    clusters = _cluster_alerts(alerts)
+    if not clusters:
         return []
-    text = ollama_request(_prompt(safe), model=model, base_url=base_url, timeout=timeout)
+    text = ollama_request(_cluster_prompt(clusters), model=model, base_url=base_url, timeout=timeout)
     try:
         value = json.loads(text)
     except (ValueError, TypeError) as error:
         raise LocalAIUnavailable("Model AI mengembalikan JSON yang tidak valid.") from error
-    return _validate_ai_groups(value, safe)
+    return _validate_cluster_verdicts(value, clusters)
 
 
 def triage_with_fallback(

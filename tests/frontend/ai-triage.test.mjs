@@ -84,6 +84,11 @@ test('ai-triage page sends only sanitized fields and offers TP/FP actions', () =
   // Buka di Triage + Siapkan insiden actions.
   assert.match(view, /Buka di Triage/);
   assert.match(view, /Siapkan insiden/);
+  // Persist to editable incidents.
+  assert.match(view, /\/api\/ai\/triage\/save/);
+  assert.match(view, /Simpan ke Insiden/);
+  assert.match(view, /verdict: group\.verdict/);
+  assert.match(view, /alert_ids: group\.alertIds/);
   // Fallback is clearly labelled, never presented as AI.
   assert.match(view, /local_rules_fallback/);
   assert.match(view, /heuristik/i);

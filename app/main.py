@@ -7,7 +7,7 @@ import io
 import json
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -40,6 +40,7 @@ from app.settings import (
     test_wazuh_connection,
     validate_settings,
     wazuh_password,
+    wazuh_search,
 )
 
 
@@ -1093,6 +1094,79 @@ def api_realtime_count():
     return {**result, "checked_at": datetime.now(timezone.utc).isoformat()}
 
 
+@app.post("/api/realtime/pull")
+def api_realtime_pull():
+    """Pull Medium+ alerts from the Wazuh Indexer and ingest them into the active DB.
+
+    Interval mode pulls on demand; daily mode only pulls once every 24 hours
+    (enforced server-side via ``realtime.last_pull_at``). Never downloads more
+    than ``realtime.max_alerts`` documents per call.
+    """
+    now = datetime.now(timezone.utc)
+    with get_db() as conn:
+        stored = load_settings(conn)
+    wazuh = stored.get("wazuh", {})
+    realtime = stored.get("realtime", {})
+    if not wazuh.get("indexer_url"):
+        raise HTTPException(status_code=400, detail="Wazuh Indexer belum dikonfigurasi di halaman Pengaturan.")
+
+    mode = str(realtime.get("mode") or "interval")
+    last_pull_at = str(realtime.get("last_pull_at") or "").strip()
+    if mode == "daily" and last_pull_at:
+        try:
+            last = datetime.fromisoformat(last_pull_at.replace("Z", "+00:00"))
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            elapsed = now - last
+            if elapsed.total_seconds() < 24 * 3600:
+                next_pull = last + timedelta(hours=24)
+                return {
+                    "status": "skipped",
+                    "reason": "Pull harian hanya dijalankan sekali setiap 24 jam.",
+                    "last_pull_at": last_pull_at,
+                    "next_pull_at": next_pull.isoformat(),
+                }
+        except ValueError:
+            pass  # Unparseable timestamp: treat as never pulled.
+
+    try:
+        docs = wazuh_search(
+            indexer_url=wazuh.get("indexer_url", ""),
+            username=wazuh.get("username", ""),
+            password=wazuh_password(stored),
+            index_pattern=wazuh.get("index_pattern", "wazuh-alerts-*"),
+            verify_tls=bool(wazuh.get("verify_tls", True)),
+            size=int(realtime.get("max_alerts") or 500),
+            since=last_pull_at,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from None
+
+    inserted = 0
+    deduplicated = 0
+    with get_db() as conn:
+        for item in docs:
+            normalized = normalize_alert(item)
+            did_insert, did_dedup = ingest_alert_with_dedup(conn, normalized)
+            if did_insert:
+                inserted += 1
+            elif did_dedup:
+                deduplicated += 1
+        # Persist the pull timestamp so daily gating and the next `since` window work.
+        stored["realtime"]["last_pull_at"] = now.isoformat()
+        save_settings(conn, stored)
+
+    return {
+        "status": "pulled",
+        "pulled_at": now.isoformat(),
+        "searched": len(docs),
+        "inserted": inserted,
+        "deduplicated": deduplicated,
+        "min_rule_level": 7,
+        "index_pattern": wazuh.get("index_pattern", "wazuh-alerts-*"),
+    }
+
+
 @app.post("/api/ai/test")
 def api_ai_test(payload: dict[str, Any]):
     with get_db() as conn:
@@ -1161,6 +1235,54 @@ def api_ai_triage(payload: dict[str, Any]):
         "alerts": safe_alerts(alerts),
         "groups": groups,
     }
+
+
+@app.post("/api/ai/triage/save")
+def api_ai_triage_save(payload: dict[str, Any]):
+    """Persist an AI triage result as editable incident groups (source='ai').
+
+    Each group becomes an ``analysis_groups`` row with its TP/FP/needs_review
+    verdict, the model's reasoning, and its member alerts. The analyst can then
+    add/remove alerts or delete the group from the Insiden page.
+    """
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload penyimpanan triage tidak valid.")
+    groups = payload.get("groups")
+    if not isinstance(groups, list) or not groups:
+        raise HTTPException(status_code=400, detail="Tidak ada grup triage untuk disimpan.")
+    tenant = payload.get("tenant") or ["all"]
+    normalize_tenants(tenant)
+
+    allowed_verdicts = {"tp", "fp", "needs_review"}
+    saved: list[dict[str, Any]] = []
+    with get_db() as conn:
+        for index, group in enumerate(groups):
+            if not isinstance(group, dict):
+                continue
+            verdict = str(group.get("verdict") or "needs_review").strip().lower()
+            if verdict not in allowed_verdicts:
+                verdict = "needs_review"
+            title = str(group.get("title") or f"AI Triage {index + 1}").strip()[:200] or f"AI Triage {index + 1}"
+            category = str(group.get("category") or "AI Triage")[:120]
+            reason = str(group.get("reason") or "")[:400]
+            group_id = uuid.uuid4()
+            pks = _validate_membership(conn, group.get("alert_ids") or [], tenant)
+            severity = {"tp": "high", "fp": "low", "needs_review": "medium"}.get(verdict, "medium")
+            conn.execute(
+                """INSERT INTO wazuh.analysis_groups(
+                    id, title, category, analysis, conclusion, recommendation, status, severity, source, verdict
+                ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (group_id, title, category, reason, "", "", "open", severity, "ai", verdict),
+            )
+            for pk in pks:
+                conn.execute(
+                    "INSERT INTO wazuh.alert_group_members(alert_pk, group_id) VALUES(%s, %s) ON CONFLICT DO NOTHING",
+                    (pk, group_id),
+                )
+            saved.append({"id": str(group_id), "title": title, "verdict": verdict, "alert_count": len(pks)})
+    if not saved:
+        raise HTTPException(status_code=400, detail="Tidak ada grup valid untuk disimpan.")
+    return {"saved": saved, "count": len(saved)}
 
 
 # A bounded, complete export is returned, or an explicit 413; never a partial file.

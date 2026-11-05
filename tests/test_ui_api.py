@@ -70,7 +70,7 @@ class SyntheticDB:
         CREATE TABLE wazuh.analysis_groups (
             id TEXT PRIMARY KEY, title TEXT, category TEXT, analysis TEXT,
             conclusion TEXT, recommendation TEXT, status TEXT, severity TEXT,
-            source TEXT, created_at TEXT, updated_at TEXT
+            source TEXT, verdict TEXT DEFAULT 'needs_review', created_at TEXT, updated_at TEXT
         );
         CREATE TABLE wazuh.alert_group_members (
             alert_pk INTEGER, group_id TEXT, UNIQUE(alert_pk, group_id)
@@ -84,9 +84,9 @@ class SyntheticDB:
         self.add_alert(2, "Beta", description="Synthetic curl bot", hit_count=3)
         self.add_alert(3, "Alpha", description="Synthetic routine", is_reviewed=True)
         self.connection.execute(
-            "INSERT INTO wazuh.analysis_groups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO wazuh.analysis_groups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (GROUP, "Synthetic incident", "Test", "Synthetic analysis", "Synthetic conclusion",
-             "Synthetic recommendation", "open", "high", "human", "2026-01-01", "2026-01-01"),
+             "Synthetic recommendation", "open", "high", "human", "needs_review", "2026-01-01", "2026-01-01"),
         )
         self.connection.executemany("INSERT INTO wazuh.alert_group_members VALUES (?, ?)", [(1, GROUP), (2, GROUP)])
         self.connection.row_factory = self.row
@@ -357,8 +357,8 @@ class UIAPIContractTests(unittest.TestCase):
 
     def test_member_add_requires_group_in_the_exact_tenant_set(self):
         self.db.connection.execute(
-            "INSERT INTO wazuh.analysis_groups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (OTHER_GROUP, "Beta-only incident", "Test", "", "", "", "open", "high", "human", "2026-01-01", "2026-01-01"),
+            "INSERT INTO wazuh.analysis_groups VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (OTHER_GROUP, "Beta-only incident", "Test", "", "", "", "open", "high", "human", "needs_review", "2026-01-01", "2026-01-01"),
         )
         self.db.connection.execute("INSERT INTO wazuh.alert_group_members VALUES (?, ?)", (2, OTHER_GROUP))
         response = self.client.post(f"/api/groups/{OTHER_GROUP}/members?tenant=Alpha", json={"alert_pks": [1]})

@@ -22,6 +22,8 @@ export async function mount(ctx) {
       realtime: {
         enabled: form.elements.realtime_enabled.checked,
         interval_seconds: Number(form.elements.interval_seconds.value) || 30,
+        mode: form.elements.realtime_mode.value,
+        max_alerts: Number(form.elements.max_alerts.value) || 500,
       },
       ai: {
         enabled: form.elements.ai_enabled.checked,
@@ -152,15 +154,27 @@ export async function mount(ctx) {
           <div class="split">
             <div>
               <h2 class="section-heading">Monitor realtime</h2>
-              <p class="meta">Preferensi disimpan sekarang; pengambilan otomatis dari Wazuh Indexer menyusul. Saat aktif nanti, antrean triage akan menyegarkan otomatis dan setiap alert yang kamu triage dicatat sebagai true positive atau false positive.</p>
+              <p class="meta">Tarik alert Medium+ (rule.level ≥ 7) dari Wazuh Indexer ke database aktif. Pilih mode: <strong>interval</strong> (setiap beberapa detik) atau <strong>harian</strong> (1× per 24 jam, dihitung dari pull terakhir).</p>
             </div>
           </div>
           <div class="form-grid">
             <div class="field">
-              <label for="realtime-interval">Interval pemeriksaan</label>
-              <select class="select" id="realtime-interval" name="interval_seconds">
-                ${[15, 30, 60, 120].map(value => `<option value="${value}" ${realtime.interval_seconds === value ? 'selected' : ''}>${value} detik</option>`).join('')}
+              <label for="realtime-mode">Mode pull</label>
+              <select class="select" id="realtime-mode" name="realtime_mode">
+                <option value="interval" ${realtime.mode === 'interval' ? 'selected' : ''}>Interval (detik)</option>
+                <option value="daily" ${realtime.mode === 'daily' ? 'selected' : ''}>Harian (1× per 24 jam)</option>
               </select>
+            </div>
+            <div class="field">
+              <label for="realtime-interval">Interval (hanya mode interval)</label>
+              <select class="select" id="realtime-interval" name="interval_seconds" ${realtime.mode === 'daily' ? 'disabled' : ''}>
+                ${[15, 30, 60, 120, 300].map(value => `<option value="${value}" ${realtime.interval_seconds === value ? 'selected' : ''}>${value} detik</option>`).join('')}
+              </select>
+            </div>
+            <div class="field">
+              <label for="realtime-max-alerts">Maksimal alert per pull</label>
+              <input class="input" id="realtime-max-alerts" name="max_alerts" type="number" min="1" max="5000" step="1" value="${esc(realtime.max_alerts)}">
+              <span class="meta">Batas dokumen yang ditarik dari Wazuh Indexer per siklus.</span>
             </div>
             <div class="field">
               <span>Status tombol header</span>
@@ -242,7 +256,11 @@ export async function mount(ctx) {
   root.addEventListener('input', () => setDirty(true), {signal});
   root.addEventListener('change', event => {
     setDirty(true);
-    if (event.target.name === 'realtime_enabled' || event.target.name === 'interval_seconds') {
+    if (event.target.name === 'realtime_mode') {
+      const interval = root.querySelector('#realtime-interval');
+      if (interval) interval.disabled = event.target.value === 'daily';
+    }
+    if (event.target.name === 'realtime_enabled' || event.target.name === 'interval_seconds' || event.target.name === 'realtime_mode') {
       const draft = collect();
       if (draft) renderStatus(realtimeLabel(draft), '');
     }

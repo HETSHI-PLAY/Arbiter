@@ -8,7 +8,7 @@ export const DEFAULT_SETTINGS = {
     password_set: false,
     auth_configured: false,
   },
-  realtime: {enabled: false, interval_seconds: 30},
+  realtime: {enabled: false, interval_seconds: 30, mode: 'interval', last_pull_at: '', max_alerts: 500},
   ai: {
     enabled: false,
     base_url: 'http://127.0.0.1:11434',
@@ -32,6 +32,10 @@ export function normalizeSettings(value) {
   base.realtime.enabled = Boolean(base.realtime.enabled);
   const interval = Number(base.realtime.interval_seconds);
   base.realtime.interval_seconds = Number.isFinite(interval) && interval >= 10 && interval <= 300 ? interval : 30;
+  if (!['interval', 'daily'].includes(base.realtime.mode)) base.realtime.mode = 'interval';
+  base.realtime.last_pull_at = String(base.realtime.last_pull_at || '');
+  const maxAlerts = Number(base.realtime.max_alerts);
+  base.realtime.max_alerts = Number.isFinite(maxAlerts) && maxAlerts >= 1 && maxAlerts <= 5000 ? maxAlerts : 500;
   base.ai.enabled = Boolean(base.ai.enabled);
   const aiTimeout = Number(base.ai.timeout_seconds);
   base.ai.timeout_seconds = Number.isFinite(aiTimeout) && aiTimeout >= 10 && aiTimeout <= 180 ? aiTimeout : 90;
@@ -42,7 +46,8 @@ export function normalizeSettings(value) {
 export function realtimeLabel(settings) {
   const normalized = normalizeSettings(settings);
   if (!normalized.realtime.enabled) return 'Monitor realtime: nonaktif';
-  return `Monitor realtime: siap setiap ${normalized.realtime.interval_seconds} detik`;
+  if (normalized.realtime.mode === 'daily') return 'Monitor realtime: pull harian (1× per 24 jam)';
+  return `Monitor realtime: pull setiap ${normalized.realtime.interval_seconds} detik`;
 }
 
 export function wazuhSummary(settings) {

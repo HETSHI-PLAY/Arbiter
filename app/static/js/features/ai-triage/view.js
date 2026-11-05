@@ -18,6 +18,7 @@ export async function mount(ctx) {
   let settings = normalizeSettings(null);
   let result = null;
   let running = false;
+  let saving = false;
 
   const scopedRoute = (path, extra = {}) => {
     const params = new URLSearchParams();
@@ -156,7 +157,8 @@ export async function mount(ctx) {
       ${result.warning ? `<div class="notice" data-kind="warning"><p>${esc(result.warning)}</p></div>` : ''}
       ${renderSummary(result, counts, result.mode)}
       ${result.groups.length
-        ? `<div class="ai-groups">${result.groups.map((group, index) => renderGroup(group, alertIndex(result.alerts), index)).join('')}</div>`
+        ? `<div class="ai-save-bar"><button class="button primary" type="button" data-action="save" ${saving ? 'disabled' : ''}>${icon('cases')} ${saving ? 'Menyimpan…' : 'Simpan ke Insiden'}</button><span class="inline-status" id="ai-save-status" role="status"></span></div>
+           <div class="ai-groups">${result.groups.map((group, index) => renderGroup(group, alertIndex(result.alerts), index)).join('')}</div>`
         : emptyState('Tidak ada alert pada scope ini', 'Ubah status review, ambang severity, atau scope tenant lalu jalankan ulang.')}`;
   }
 
@@ -235,6 +237,42 @@ export async function mount(ctx) {
     }
   }
 
+  async function save() {
+    if (saving || !result?.groups?.length) return;
+    saving = true;
+    const status = root.querySelector('#ai-save-status');
+    const button = root.querySelector('[data-action=save]');
+    if (button) button.disabled = true;
+    if (status) { status.textContent = 'Menyimpan grup ke Insiden…'; status.dataset.kind = 'info'; }
+    try {
+      const body = await json('/api/ai/triage/save', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          tenant: tenantValues(route.params),
+          groups: result.groups.map(group => ({
+            title: group.title,
+            category: group.category,
+            verdict: group.verdict,
+            reason: group.reason,
+            alert_ids: group.alertIds,
+          })),
+        }),
+        signal,
+        timeout: 30000,
+      });
+      saving = false;
+      if (status) { status.textContent = `${body.count} grup tersimpan. Buka halaman Insiden untuk menambah/mengurangi alert.`; status.dataset.kind = 'success'; }
+      if (button) { button.disabled = false; button.innerHTML = `${icon('cases')} Simpan ke Insiden`; }
+      notify(`${body.count} grup triage tersimpan ke Insiden.`, 'success');
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      saving = false;
+      if (status) { status.textContent = error.message; status.dataset.kind = 'error'; }
+      if (button) { button.disabled = false; button.innerHTML = `${icon('cases')} Simpan ke Insiden`; }
+    }
+  }
+
   root.addEventListener('submit', event => {
     if (event.target.id !== 'ai-triage-form') return;
     event.preventDefault();
@@ -244,6 +282,7 @@ export async function mount(ctx) {
   root.addEventListener('click', event => {
     const action = event.target.closest('[data-action]')?.dataset.action;
     if (action === 'run-inline') run();
+    if (action === 'save') save();
   }, {signal});
 
   root.innerHTML = loadingRows(4);

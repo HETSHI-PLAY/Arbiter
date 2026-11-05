@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS wazuh.analysis_groups (
     status TEXT NOT NULL DEFAULT 'open',
     severity TEXT NOT NULL DEFAULT 'medium',
     source TEXT NOT NULL DEFAULT 'human',
+    verdict TEXT NOT NULL DEFAULT 'needs_review',
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -564,6 +565,11 @@ def init_database() -> None:
     """Executes schema migrations and ensures indices exist."""
     with get_db() as conn:
         conn.execute(SCHEMA_SQL)
+        # Idempotent migration for databases created before the AI triage verdict column.
+        conn.execute(
+            "ALTER TABLE wazuh.analysis_groups "
+            "ADD COLUMN IF NOT EXISTS verdict TEXT NOT NULL DEFAULT 'needs_review'"
+        )
         _load_profile_overrides(conn)
 
 

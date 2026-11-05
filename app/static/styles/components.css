@@ -399,6 +399,7 @@
 .ai-group-actions { display:flex; gap:8px; flex-wrap:wrap; padding-top:12px; border-top:1px solid var(--border); }
 .ai-alert-table { margin-top:12px; }
 .ai-alert-desc { display:block; max-width:64ch; overflow-wrap:anywhere; }
+.ai-save-bar { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 
 @media(max-width:1099px) {
   .realtime-grid { grid-template-columns:minmax(0,1fr); }

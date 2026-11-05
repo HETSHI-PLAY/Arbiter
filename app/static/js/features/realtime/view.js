@@ -2,22 +2,22 @@ import {json} from '../../api/client.js';
 import {esc, icon, errorState, loadingRows, formatTime} from '../../ui/primitives.js';
 import {normalizeSettings} from '../settings/model.js';
 
-const INTERVALS = [15, 30, 60, 120, 300];
-
 export async function mount(ctx) {
   const {root, signal, notify} = ctx;
   let settings = null;
   let history = [];
   let timer = null;
-  let checking = false;
+  let pulling = false;
 
   function schedule() {
     clearInterval(timer);
     timer = null;
-    if (settings?.realtime?.enabled) {
-      const seconds = Number(settings.realtime.interval_seconds) || 30;
-      timer = setInterval(() => { check(); }, seconds * 1000);
-    }
+    if (!settings?.realtime?.enabled) return;
+    // Daily mode still polls on a short cadence; the server enforces the 24h gate.
+    const seconds = settings.realtime.mode === 'daily'
+      ? 300
+      : Number(settings.realtime.interval_seconds) || 30;
+    timer = setInterval(() => { pull(); }, seconds * 1000);
   }
 
   function render() {
@@ -26,21 +26,25 @@ export async function mount(ctx) {
     const wazuh = data.wazuh;
     const latest = history[0] || null;
     const configured = Boolean(wazuh.indexer_url);
-    const last = latest?.ok
-      ? `<strong class="num">${latest.count.toLocaleString('id-ID')}</strong> alert Medium+`
-      : latest
-        ? `<span class="inline-status" data-kind="error">${esc(latest.error || 'Pemeriksaan gagal')}</span>`
-        : '<span class="muted">Belum ada pemeriksaan pada sesi ini.</span>';
+    const modeLabel = realtime.mode === 'daily' ? 'Harian (1× per 24 jam)' : `Setiap ${realtime.interval_seconds} detik`;
+    const last = latest?.status === 'pulled'
+      ? `<strong class="num">${latest.inserted.toLocaleString('id-ID')}</strong> alert baru · ${latest.searched.toLocaleString('id-ID')} diperiksa`
+      : latest?.status === 'skipped'
+        ? `<span class="inline-status" data-kind="info">Dilewati — pull harian sudah dijalankan</span>`
+        : latest
+          ? `<span class="inline-status" data-kind="error">${esc(latest.error || 'Pull gagal')}</span>`
+          : '<span class="muted">Belum ada pull pada sesi ini.</span>';
 
     root.innerHTML = `
       <header class="page-header">
         <div class="page-heading">
           <h1>Realtime</h1>
-          <p class="page-description">Monitor jumlah alert Wazuh Medium+ (rule.level ≥ 7) secara berkala. Halaman ini hanya menghitung — alert tidak diunduh atau disimpan.</p>
+          <p class="page-description">Tarik alert Medium+ (rule.level ≥ 7) dari Wazuh Indexer ke database aktif, lalu kelompokkan di AI Triage. Alert yang sama otomatis digabung (dedup) saat masuk.</p>
         </div>
         <div class="page-actions">
           <a class="button" href="#/settings">${icon('settings')} Pengaturan Wazuh</a>
-          <button class="button primary" data-action="check" type="button" ${checking || !configured ? 'disabled' : ''}>${icon('refresh')} Periksa sekarang</button>
+          <a class="button" href="#/ai-triage">${icon('spark')} AI Triage</a>
+          <button class="button primary" data-action="pull" type="button" ${pulling || !configured ? 'disabled' : ''}>${icon('refresh')} Pull sekarang</button>
         </div>
       </header>
 
@@ -53,17 +57,17 @@ export async function mount(ctx) {
             <div class="key-value">
               <dt>Status</dt>
               <dd><span class="badge ${realtime.enabled ? 'success' : 'neutral'}"><span class="status-dot"></span>${realtime.enabled ? 'Aktif' : 'Nonaktif'}</span></dd>
-              <dd class="meta">${realtime.enabled ? `Memeriksa setiap ${realtime.interval_seconds} detik` : 'Polling otomatis dimatikan'}</dd>
+              <dd class="meta">${realtime.enabled ? modeLabel : 'Polling otomatis dimatikan'}</dd>
             </div>
             <div class="key-value">
-              <dt>Pemeriksaan terakhir</dt>
+              <dt>Pull terakhir</dt>
               <dd>${latest ? esc(formatTime(latest.at)) : '—'}</dd>
               <dd class="meta">${latest?.duration ? `${latest.duration} ms` : 'Belum ada data'}</dd>
             </div>
             <div class="key-value">
-              <dt>Jumlah terakhir</dt>
+              <dt>Hasil terakhir</dt>
               <dd>${last}</dd>
-              <dd class="meta">Filter: ${esc(wazuh.index_pattern || 'wazuh-alerts-*')} · rule.level ≥ 7</dd>
+              <dd class="meta">Filter: ${esc(wazuh.index_pattern || 'wazuh-alerts-*')} · rule.level ≥ 7 · maks ${realtime.max_alerts} alert/pull</dd>
             </div>
             <div class="key-value">
               <dt>Indexer</dt>
@@ -73,70 +77,72 @@ export async function mount(ctx) {
           </div>
           <div class="settings-actions">
             <button class="button" data-action="toggle" type="button" ${configured ? '' : 'disabled'}>${realtime.enabled ? 'Matikan monitor' : 'Aktifkan monitor'}</button>
-            <div class="field" style="max-width:220px;">
-              <label for="realtime-interval">Interval</label>
-              <select class="select" id="realtime-interval" ${realtime.enabled ? '' : 'disabled'}>
-                ${INTERVALS.map(value => `<option value="${value}" ${Number(realtime.interval_seconds) === value ? 'selected' : ''}>${value} detik</option>`).join('')}
-              </select>
-            </div>
           </div>
-          <p class="meta">Monitor ini tidak menarik alert. Untuk AI Triage dan pengelompokan alert, buka menu <a href="#/ai-triage">AI Triage</a>.</p>
+          <p class="meta">Alert yang ditarik masuk ke database aktif dan muncul di antrean <a href="#/triage">Triage</a>. Untuk mengelompokkan dan klasifikasi TP/FP, buka <a href="#/ai-triage">AI Triage</a>.</p>
         </section>
 
         <section class="form-section realtime-card">
           <h2 class="section-heading">Riwayat sesi</h2>
-          ${history.length ? `<div class="table-region"><table class="data-table"><thead><tr><th>Waktu</th><th class="numeric">Medium+</th><th>Hasil</th></tr></thead><tbody>
+          ${history.length ? `<div class="table-region"><table class="data-table"><thead><tr><th>Waktu</th><th>Status</th><th class="numeric">Baru</th><th class="numeric">Dedup</th></tr></thead><tbody>
             ${history.map(item => `<tr>
               <td class="mono">${esc(formatTime(item.at))}</td>
-              <td class="numeric num">${item.ok ? item.count.toLocaleString('id-ID') : '—'}</td>
-              <td>${item.ok ? `<span class="inline-status" data-kind="success">OK · ${item.duration} ms</span>` : `<span class="inline-status" data-kind="error">${esc(item.error || 'Gagal')}</span>`}</td>
+              <td>${item.status === 'pulled' ? `<span class="inline-status" data-kind="success">Pull OK</span>` : item.status === 'skipped' ? `<span class="inline-status" data-kind="info">Dilewati (harian)</span>` : `<span class="inline-status" data-kind="error">${esc(item.error || 'Gagal')}</span>`}</td>
+              <td class="numeric num">${item.status === 'pulled' ? item.inserted.toLocaleString('id-ID') : '—'}</td>
+              <td class="numeric num">${item.status === 'pulled' ? item.deduplicated.toLocaleString('id-ID') : '—'}</td>
             </tr>`).join('')}
           </tbody></table></div>` : '<p class="muted">Riwayat hanya disimpan di memori halaman ini dan hilang saat berpindah menu atau memuat ulang.</p>'}
         </section>
       </div>`;
   }
 
-  async function check() {
-    if (checking || !settings?.wazuh?.indexer_url) return;
-    checking = true;
+  async function pull() {
+    if (pulling || !settings?.wazuh?.indexer_url) return;
+    pulling = true;
     const started = performance.now();
     try {
-      const result = await json('/api/realtime/count', {signal, timeout: 15000});
+      const result = await json('/api/realtime/pull', {method: 'POST', signal, timeout: 60000});
       history.unshift({
-        at: result.checked_at || new Date().toISOString(),
-        ok: true,
-        count: Number(result.count) || 0,
+        at: result.pulled_at || new Date().toISOString(),
+        status: result.status,
+        searched: Number(result.searched) || 0,
+        inserted: Number(result.inserted) || 0,
+        deduplicated: Number(result.deduplicated) || 0,
+        next_pull_at: result.next_pull_at || '',
         duration: Math.round(performance.now() - started),
       });
+      if (result.status === 'pulled') {
+        notify(`${result.inserted} alert baru ditarik · ${result.deduplicated} dedup.`, 'success');
+      } else if (result.status === 'skipped') {
+        notify(result.reason || 'Pull harian dilewati.', 'info');
+      }
     } catch (error) {
       if (error.name === 'AbortError') return;
       history.unshift({
         at: new Date().toISOString(),
-        ok: false,
+        status: 'error',
         error: error.message,
         duration: Math.round(performance.now() - started),
       });
     } finally {
-      checking = false;
+      pulling = false;
       history = history.slice(0, 20);
       if (root.isConnected) render();
     }
   }
 
-  function saveRealtime(changes) {
+  async function saveRealtime(changes) {
     const payload = {realtime: {...settings.realtime, ...changes}};
-    return json('/api/settings', {
+    const body = await json('/api/settings', {
       method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload), signal,
-    }).then(body => {
-      settings = normalizeSettings(body.settings);
-      window.dispatchEvent(new CustomEvent('arbiter:realtime-changed', {detail: settings.realtime}));
-      return settings;
     });
+    settings = normalizeSettings(body.settings);
+    window.dispatchEvent(new CustomEvent('arbiter:realtime-changed', {detail: settings.realtime}));
+    return settings;
   }
 
   root.addEventListener('click', async event => {
     const action = event.target.closest('[data-action]')?.dataset.action;
-    if (action === 'check') { await check(); return; }
+    if (action === 'pull') { await pull(); return; }
     if (action === 'toggle') {
       const button = event.target.closest('[data-action=toggle]');
       button.disabled = true;
@@ -145,25 +151,12 @@ export async function mount(ctx) {
         schedule();
         render();
         notify(settings.realtime.enabled ? 'Monitor realtime diaktifkan.' : 'Monitor realtime dimatikan.', settings.realtime.enabled ? 'success' : 'info');
-        if (settings.realtime.enabled) await check();
+        if (settings.realtime.enabled) await pull();
       } catch (error) {
         if (error.name !== 'AbortError') notify(error.message, 'error');
       } finally {
         if (button.isConnected) button.disabled = false;
       }
-    }
-  }, {signal});
-
-  root.addEventListener('change', async event => {
-    if (event.target.id !== 'realtime-interval') return;
-    const interval = Number(event.target.value);
-    try {
-      await saveRealtime({interval_seconds: interval});
-      schedule();
-      render();
-      notify(`Interval realtime diubah ke ${interval} detik.`, 'success');
-    } catch (error) {
-      if (error.name !== 'AbortError') notify(error.message, 'error');
     }
   }, {signal});
 
@@ -173,7 +166,7 @@ export async function mount(ctx) {
     settings = normalizeSettings(body.settings);
     render();
     schedule();
-    if (settings.realtime.enabled && settings.wazuh.indexer_url) check();
+    if (settings.realtime.enabled && settings.wazuh.indexer_url) pull();
   } catch (error) {
     if (error.name === 'AbortError') return;
     root.innerHTML = `<header class="page-header"><div class="page-heading"><h1>Realtime</h1></div></header>${errorState('Monitor realtime belum dapat dimuat dari workspace lokal.')}`;

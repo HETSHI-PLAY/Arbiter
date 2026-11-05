@@ -33,6 +33,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "realtime": {
         "enabled": False,
         "interval_seconds": 30,
+        "mode": "interval",
+        "last_pull_at": "",
+        "max_alerts": 500,
     },
     "ai": {
         "enabled": False,
@@ -126,6 +129,18 @@ def validate_settings(payload: dict[str, Any], current: dict[str, Any] | None = 
     if not 10 <= interval <= 300:
         raise ValueError("Interval realtime harus antara 10 dan 300 detik.")
     realtime["interval_seconds"] = interval
+    mode = _text(realtime.get("mode"), "realtime.mode", 20) or "interval"
+    if mode not in ("interval", "daily"):
+        raise ValueError("realtime.mode harus interval atau daily.")
+    realtime["mode"] = mode
+    realtime["last_pull_at"] = _text(realtime.get("last_pull_at"), "realtime.last_pull_at", 40)
+    try:
+        max_alerts = int(realtime.get("max_alerts", 500))
+    except (TypeError, ValueError):
+        raise ValueError("realtime.max_alerts harus berupa angka.") from None
+    if not 1 <= max_alerts <= 5000:
+        raise ValueError("realtime.max_alerts harus antara 1 dan 5000.")
+    realtime["max_alerts"] = max_alerts
 
     ai = settings.get("ai")
     if not isinstance(ai, dict):
@@ -337,3 +352,96 @@ def test_wazuh_connection(
         "index_pattern": pattern,
         "min_rule_level": MIN_RULE_LEVEL,
     }
+
+
+def _wazuh_opener(indexer_url: str, username: str, password: str, verify_tls: bool):
+    """Build a ProxyHandler-free opener with optional basic auth + TLS control."""
+    context = None
+    if indexer_url.lower().startswith("https://"):
+        context = ssl.create_default_context()
+        if not verify_tls:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        *([urllib.request.HTTPSHandler(context=context)] if context else []),
+    )
+
+
+def _wazuh_request(opener, request, timeout: float) -> tuple[int, bytes]:
+    """Open a Wazuh request and translate transport errors into user-safe ValueErrors."""
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            return response.status, response.read(64 * 1024 * 1024)
+    except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            raise ValueError("Autentikasi Wazuh Indexer ditolak. Periksa username dan password.") from None
+        if error.code == 404:
+            raise ValueError("Indeks tidak ditemukan. Periksa pola indeks Wazuh.") from None
+        raise ValueError(f"Wazuh Indexer menolak permintaan (HTTP {error.code}).") from None
+    except urllib.error.URLError as error:
+        reason = str(getattr(error, "reason", ""))
+        if isinstance(getattr(error, "reason", None), ssl.SSLError) or "certificate" in reason.lower():
+            raise ValueError("TLS gagal diverifikasi. Periksa sertifikat atau matikan verifikasi TLS untuk lab lokal.") from None
+        raise ValueError("Tidak dapat terhubung ke Wazuh Indexer. Periksa URL dan jaringan.") from None
+    except TimeoutError:
+        raise ValueError("Koneksi ke Wazuh Indexer melebihi batas waktu.") from None
+
+
+def wazuh_search(
+    *,
+    indexer_url: str,
+    username: str,
+    password: str,
+    index_pattern: str,
+    verify_tls: bool,
+    size: int = 500,
+    since: str = "",
+    timeout: float = 10.0,
+) -> list[dict[str, Any]]:
+    """Pull Medium+ alert documents from the Wazuh Indexer (never count-only).
+
+    Returns a list of raw ``_source`` documents (newest first). ``since`` is an
+    optional ISO timestamp lower bound on the alert ``timestamp`` field so that
+    interval/daily pulls only fetch alerts newer than the previous pull.
+    """
+    base = str(indexer_url or "").strip().rstrip("/")
+    if not base or not _URL.match(base):
+        raise ValueError("URL Wazuh Indexer belum diatur atau tidak valid.")
+    pattern = str(index_pattern or "wazuh-alerts-*").strip()
+    if not _INDEX_PATTERN.match(pattern):
+        raise ValueError("Pola indeks tidak valid.")
+    if not 1 <= int(size) <= 5000:
+        raise ValueError("Ukuran pencarian Wazuh harus antara 1 dan 5000.")
+
+    range_query: dict[str, Any] = {"rule.level": {"gte": int(MIN_RULE_LEVEL)}}
+    if since and str(since).strip():
+        range_query["timestamp"] = {"gte": str(since).strip()}
+    payload = {
+        "size": int(size),
+        "query": {"range": range_query},
+        "sort": [{"timestamp": {"order": "desc"}}],
+    }
+    target = f"{base}/{urllib.parse.quote(pattern, safe='*-._,')}/_search"
+    request = urllib.request.Request(
+        target,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+    )
+    if username:
+        token = base64.b64encode(f"{username}:{password}".encode()).decode()
+        request.add_header("Authorization", f"Basic {token}")
+    opener = _wazuh_opener(base, username, password, verify_tls)
+    status, raw = _wazuh_request(opener, request, timeout)
+    try:
+        parsed = json.loads(raw.decode("utf-8") or "{}")
+    except ValueError:
+        raise ValueError("Respons Wazuh Indexer bukan JSON yang valid.") from None
+    hits = parsed.get("hits", {}) if isinstance(parsed, dict) else {}
+    outer = hits.get("hits", []) if isinstance(hits, dict) else []
+    docs: list[dict[str, Any]] = []
+    for hit in outer:
+        if isinstance(hit, dict) and isinstance(hit.get("_source"), dict):
+            docs.append(hit["_source"])
+    return docs
