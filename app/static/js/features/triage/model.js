@@ -9,6 +9,7 @@ export function summaryRequestParams(query) {
   if (query.filter_preset) p.set('filter_preset', query.filter_preset);
   if (query.status && query.status !== 'all') p.set('status', query.status);
   if (query.group_id) p.set('group_id', query.group_id);
+  if (query.alert_ids) p.set('alert_ids', query.alert_ids);
   if (query.review_status) p.set('review_status', query.review_status);
   if (query.time_preset) p.set('time_preset', query.time_preset);
   if (query.secondary_facet && query.secondary_facet_value) {

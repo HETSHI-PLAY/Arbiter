@@ -1,0 +1,13 @@
+{
+  "name": "arbiter",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local SOC investigation desk for normalized Wazuh telemetry.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/frontend/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

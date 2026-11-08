@@ -15,6 +15,7 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from typing import Any
 
 from app.secure_store import SecretStoreError, decrypt_text, encrypt_text, is_encrypted
@@ -283,6 +284,31 @@ def wazuh_alert_query(min_rule_level: int = MIN_RULE_LEVEL) -> dict[str, Any]:
     return {"query": {"range": {"rule.level": {"gte": int(min_rule_level)}}}}
 
 
+def _normalize_wazuh_timestamp(value: str) -> str:
+    """Convert an ISO timestamp to the form Wazuh Indexer's date field accepts.
+
+    Python's ``datetime.isoformat()`` emits ``+00:00``; Wazuh alert documents
+    (and the indexer's strict date parser) use ``+0000``. A colon in the offset
+    makes the range query fail with HTTP 400, so collapse it here.
+    """
+    text = str(value or "").strip()
+    text = re.sub(r"([+-]\d{2}):(\d{2})$", r"\1\2", text)
+    return text
+
+
+def _valid_timestamp(value: str) -> bool:
+    """True when the value parses as a real instant (guards against sending a
+    garbage string that would 400 the indexer)."""
+    text = str(value or "").strip()
+    if not text:
+        return False
+    try:
+        datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return True
+    except ValueError:
+        return False
+
+
 def test_wazuh_connection(
     *,
     indexer_url: str,
@@ -327,11 +353,12 @@ def test_wazuh_connection(
             body = response.read(1024 * 1024)
             status = response.status
     except urllib.error.HTTPError as error:
+        detail = _http_error_reason(error)
         if error.code in (401, 403):
             raise ValueError("Autentikasi Wazuh Indexer ditolak. Periksa username dan password.") from None
         if error.code == 404:
             raise ValueError("Indeks tidak ditemukan. Periksa pola indeks Wazuh.") from None
-        raise ValueError(f"Wazuh Indexer menolak permintaan (HTTP {error.code}).") from None
+        raise ValueError(f"Wazuh Indexer menolak permintaan (HTTP {error.code}).{detail}") from None
     except urllib.error.URLError as error:
         reason = str(getattr(error, "reason", ""))
         if isinstance(getattr(error, "reason", None), ssl.SSLError) or "certificate" in reason.lower():
@@ -374,11 +401,12 @@ def _wazuh_request(opener, request, timeout: float) -> tuple[int, bytes]:
         with opener.open(request, timeout=timeout) as response:
             return response.status, response.read(64 * 1024 * 1024)
     except urllib.error.HTTPError as error:
+        detail = _http_error_reason(error)
         if error.code in (401, 403):
             raise ValueError("Autentikasi Wazuh Indexer ditolak. Periksa username dan password.") from None
         if error.code == 404:
             raise ValueError("Indeks tidak ditemukan. Periksa pola indeks Wazuh.") from None
-        raise ValueError(f"Wazuh Indexer menolak permintaan (HTTP {error.code}).") from None
+        raise ValueError(f"Wazuh Indexer menolak permintaan (HTTP {error.code}).{detail}") from None
     except urllib.error.URLError as error:
         reason = str(getattr(error, "reason", ""))
         if isinstance(getattr(error, "reason", None), ssl.SSLError) or "certificate" in reason.lower():
@@ -386,6 +414,31 @@ def _wazuh_request(opener, request, timeout: float) -> tuple[int, bytes]:
         raise ValueError("Tidak dapat terhubung ke Wazuh Indexer. Periksa URL dan jaringan.") from None
     except TimeoutError:
         raise ValueError("Koneksi ke Wazuh Indexer melebihi batas waktu.") from None
+
+
+def _http_error_reason(error: urllib.error.HTTPError) -> str:
+    """Extract a short, safe reason from an upstream HTTP error body.
+
+    Returns '' when the body is missing or not JSON. Never echoes credentials —
+    the body is the indexer's own error payload.
+    """
+    try:
+        raw = error.read(64 * 1024).decode("utf-8", "replace")
+    except Exception:
+        return ""
+    if not raw:
+        return ""
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        snippet = re.sub(r"\s+", " ", raw).strip()[:200]
+        return f" ({snippet})" if snippet else ""
+    if not isinstance(parsed, dict):
+        return ""
+    reason = parsed.get("error", {}).get("reason") if isinstance(parsed.get("error"), dict) else parsed.get("error")
+    if isinstance(reason, str) and reason.strip():
+        return f" {reason.strip()[:300]}"
+    return ""
 
 
 def wazuh_search(
@@ -416,7 +469,9 @@ def wazuh_search(
 
     range_query: dict[str, Any] = {"rule.level": {"gte": int(MIN_RULE_LEVEL)}}
     if since and str(since).strip():
-        range_query["timestamp"] = {"gte": str(since).strip()}
+        ts = _normalize_wazuh_timestamp(str(since))
+        if _valid_timestamp(ts):
+            range_query["timestamp"] = {"gte": ts}
     payload = {
         "size": int(size),
         "query": {"range": range_query},

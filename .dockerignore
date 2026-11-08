@@ -1,0 +1,33 @@
+# Git
+.git
+.gitignore
+.gitattributes
+AGENTS.local.md
+
+# Secrets & env — never bake into the image
+.env
+.env.local
+.env.example
+secret.key
+*.secret.key
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node
+node_modules/
+
+# Tests, docs, AI config, graph cache — not needed at runtime
+tests/
+docs/
+.ai/
+.mcp.json
+graphify-out/
+start.sh
+init-db.sql
+docker-compose.yml
+compose.override.yaml

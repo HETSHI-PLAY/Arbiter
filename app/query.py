@@ -154,10 +154,24 @@ def alert_where(
     time_from: str | None = None, time_to: str | None = None,
     facet: str = "", facet_value: str = "",
     secondary_facet: str = "", secondary_facet_value: str = "",
+    alert_ids: str | Sequence[int | str] | None = None,
 ) -> tuple[str, list[Any]]:
     group_id = validated_group_id(group_id)
     clauses: list[str] = []
     params: list[Any] = []
+    if alert_ids is not None and str(alert_ids).strip() != "":
+        raw_ids = (
+            [tok.strip() for tok in str(alert_ids).split(",") if tok.strip()]
+            if isinstance(alert_ids, str)
+            else [tok for tok in alert_ids if str(tok).strip()]
+        )
+        if raw_ids:
+            try:
+                parsed_ids = positive_ids(raw_ids)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            clauses.append("a.id = ANY(%s)")
+            params.append(parsed_ids)
     if q:
         columns = (
             "a.alert_id", "a.agent_name", "a.agent_ip", "a.rule_id", "a.description",
@@ -230,6 +244,9 @@ def alert_where(
 
 MALICIOUS_URI_RX = re.compile(
     r'(?i)(?:'
+    r'(?:\.|%2e|%252e){2}(?:/|\\|%2f|%5c)|'
+    r'/cgi-bin/|'
+    r'/etc/(?:passwd|hosts|shadow|issue|group)|'
     r'/\.(?!well-known[/?#]|$)[a-zA-Z0-9_.-]+|'
     r'/(?:[^/]+/)*(?:gcp|firebase|google-(?:services|key)|aws|boto|azure-pipelines|bitbucket-pipelines|docker-compose|service-account|appsettings|_?env\d*)[^/]*\.(?:json|ya?ml|cfg|properties|template)|'
     r'^/[^/]+\.(?:json|ya?ml|cfg|properties|template|key|boto|htpasswd)(?:\?|$)|'
@@ -243,6 +260,7 @@ MALICIOUS_URI_RX = re.compile(
 
 MALICIOUS_QUERY_RX = re.compile(
     r'(?i)(?:'
+    r'(?:\.|%2e|%252e){2}(?:/|\\|%2f|%5c)|'
     r'%22|%27|%3C|%3E|%7C|[\"\'<>]|\|s\.|'
     r'rest_route=|'
     r'author=\d+|'
@@ -262,6 +280,7 @@ MALICIOUS_METHOD_RX = re.compile(
 MALICIOUS_UA_RX = re.compile(
     r'(?i)(?:'
     r'zgrab|Go Web Pentest Tool|masscan|nuclei|nikto|sqlmap|nmap|'
+    r'lkx-|traversalplugin|apache2449|leakix|'
     r'^-+$|^Mozilla/5\.0 \(compatible\)$|^Mozilla/5\.0 \([^)]+\) AppleWebKit/[0-9.]+$|'
     r'Firefox/3\.|Linux i686'
     r')'

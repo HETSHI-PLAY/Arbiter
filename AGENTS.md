@@ -25,12 +25,12 @@ When user prompt includes `/work`:
 | Layer | Technology | Notes |
 |-------|-----------|-------|
 | Backend | **FastAPI** (Python 3.11+) + **Uvicorn** | Single `app/main.py` entry, modular `app/query.py` |
-| Database | **PostgreSQL 16** via `psycopg` | Schema in `init-db.sql` and `app/database.py` |
+| Database | **PostgreSQL 16** via `psycopg` | Schema in `docker/postgres/init.sql` and `app/database.py` |
 | Frontend | **Vanilla JavaScript ES modules** + **native CSS** | No React, Vue, Angular, Tailwind. Pure DOM manipulation. |
 | Typography | IBM Plex Sans / Mono (local woff2, OFL) | In `app/static/fonts/` |
 | Design tokens | CSS custom properties in `app/static/styles/tokens.css` | Exported from `docs/ui-ux-redesign/DESIGN.md` |
 | Exports | python-docx, openpyxl | In `app/exports.py` |
-| Containerization | Docker + docker-compose | `network_mode: host` connects to host PostgreSQL |
+| Containerization | Docker + Docker Compose | `network_mode: host` connects to host PostgreSQL |
 
 ## Architecture (frontend)
 
@@ -62,6 +62,29 @@ app/
 │           ├── imports/            # model.js, render.js, view.js
 │           ├── reports/            # model.js, render.js, view.js
 │           └── settings/           # model.js, view.js (Wazuh Indexer + realtime)
+```
+
+## Repository layout
+
+```
+app/                    # FastAPI backend + static frontend (source of truth)
+docker/                 # Container extras: nginx reverse-proxy, postgres init schema
+  postgres/init.sql     # PostgreSQL schema (mounted by compose standalone profile)
+  nginx/default.conf    # Optional TLS reverse-proxy template
+scripts/                # Ops automation (setup-ai-symlinks.sh, ...)
+tests/                  # Unit/integration tests (synthetic fixtures only)
+docs/                   # Design specs, plans, evidence, ARCHITECTURE.md
+.ai/                    # Shared AI-agent config (rules/, commands/, skills/, agents/, hooks/)
+AGENTS.md               # Authoritative agent context
+AGENTS.local.md         # Machine-specific overrides (git-ignored)
+.mcp.json               # Shared MCP config
+compose.yaml            # Docker Compose orchestration
+compose.override.yaml   # Local dev overrides (bind-mount app/)
+Dockerfile              # Multi-stage build
+.dockerignore
+package.json            # npm scripts: wraps frontend tests (`npm test`)
+requirements.txt        # Python deps
+start.sh                # Local uvicorn --reload launcher
 ```
 
 ## Four destinations (not a monolithic page)
@@ -97,7 +120,7 @@ There is **no overview dashboard**. Triage is the entry point.
 - **NEVER** read `.env`, production database, real alert records, raw logs, or live UI on port 8000.
 - **NEVER** run `tests.test_api` against the active database — it expects live PostgreSQL with real data.
 - All development and QA uses synthetic fixtures inside the isolated test suites only.
-- Use isolated test suites: `tests.test_ui_api`, `tests.test_ui_safety`, `tests.test_parser`, `tests.test_exports`, `tests.test_privacy`, `tests.test_dedup`, `tests.test_settings`.
+- Use isolated test suites: `tests.test_wazuh_intel`, `tests.test_ui_api`, `tests.test_ui_safety`, `tests.test_parser`, `tests.test_exports`, `tests.test_privacy`, `tests.test_dedup`, `tests.test_settings`.
 
 ## Running tests
 
@@ -106,7 +129,7 @@ There is **no overview dashboard**. Triage is the entry point.
 node --test tests/frontend/*.test.mjs
 
 # Backend - SAFE isolated suites only (92 tests)
-.venv/bin/python -m unittest tests.test_parser tests.test_exports tests.test_privacy tests.test_dedup tests.test_ui_api tests.test_ui_safety tests.test_settings -q
+.venv/bin/python -m unittest tests.test_wazuh_intel tests.test_parser tests.test_exports tests.test_privacy tests.test_dedup tests.test_ui_api tests.test_ui_safety tests.test_settings -q
 
 # Design system lint
 npx -y @google/design.md@0.4.0 lint docs/ui-ux-redesign/DESIGN.md

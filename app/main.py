@@ -17,7 +17,15 @@ from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import HOST, PORT
-from app.ai_triage import safe_alerts, test_ollama, triage_with_fallback
+from app.ai_triage import (
+    AI_TRIAGE_STATE_KEY,
+    current_wib_window_key,
+    merge_triage_groups,
+    safe_alerts,
+    test_ollama,
+    triage_with_fallback,
+    wib_window_key,
+)
 from app.core import normalize_alert, suggestions_with_fallback
 from app.intel import enrich_ip, is_valid_ip, sync_remote_cache, upsert_ip_cache
 import app.database as db_module
@@ -33,9 +41,11 @@ from app.parser import parse_export
 from app.privacy import sanitize_text
 from app.query import alert_where, normalize_tenants, positive_ids, tenant_clause, validated_group_id, PIVOT_DEFINITIONS, FACET_COLUMNS, is_malicious_alert_record
 from app.settings import (
+    load_document,
     load_settings,
     migrate_settings,
     redact_settings,
+    save_document,
     save_settings,
     test_wazuh_connection,
     validate_settings,
@@ -62,6 +72,16 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def no_cache_static_assets(request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith(("/static/js/", "/static/styles/")):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=Path(__file__).with_name("static"), check_dir=False), name="static")
 
 
@@ -190,6 +210,7 @@ def list_alerts(
     facet_value: str = "",
     secondary_facet: str = "",
     secondary_facet_value: str = "",
+    alert_ids: str = "",
     sort: str = "desc",
     sort_by: str = "timestamp",
     limit: int = 500,
@@ -205,6 +226,7 @@ def list_alerts(
         time_preset=time_preset, time_from=time_from, time_to=time_to,
         facet=facet, facet_value=facet_value,
         secondary_facet=secondary_facet, secondary_facet_value=secondary_facet_value,
+        alert_ids=alert_ids,
     )
 
     # Sort order
@@ -318,6 +340,34 @@ def batch_update_review(payload: dict[str, Any], tenant: list[str] = Query(defau
             (is_reviewed, is_reviewed, clean_pks),
         )
     return {"status": "ok", "count": len(clean_pks), "is_reviewed": is_reviewed}
+
+
+@app.post("/api/alerts/full-logs")
+def bulk_full_logs(payload: dict[str, Any], tenant: list[str] = Query(default=["all"])):
+    """Return full_log for a set of in-scope alert ids, for group-level copy.
+
+    Mirrors the single-alert detail endpoint: full_log is the analyst's own
+    local telemetry, returned only for alerts that pass the active tenant
+    membership check. No silent widening — every id is validated.
+    """
+    normalize_tenants(tenant)
+    alert_ids = payload.get("alert_ids") or []
+    if not isinstance(alert_ids, list) or not alert_ids:
+        raise HTTPException(status_code=400, detail="alert_ids harus berupa daftar id alert.")
+    with get_db() as conn:
+        clean_pks = _validate_membership(conn, alert_ids, tenant)
+    with get_db() as conn:
+        rows = conn.execute(
+            """SELECT a.id, a.alert_id, a.description, a.source_ip, a.agent_name,
+                      a.rule_id, a.rule_level, a.timestamp,
+                      COALESCE(a.raw->>'full_log', '') AS full_log
+               FROM wazuh.alerts a
+               WHERE a.id = ANY(%s)
+               ORDER BY a.rule_id NULLS LAST, a.timestamp NULLS LAST, a.id""",
+            (clean_pks,),
+        ).fetchall()
+    items = [{**dict(row), "full_log": row["full_log"] or ""} for row in rows]
+    return {"items": items, "count": len(items)}
 
 
 @app.post("/api/intel/enrich")
@@ -956,6 +1006,7 @@ def triage_summary(
     time_to: str = "",
     facet: str = "",
     facet_value: str = "",
+    alert_ids: str = "",
 ):
     where_sql, params = alert_where(
         q=q,
@@ -971,6 +1022,7 @@ def triage_summary(
         facet_value=facet_value,
         secondary_facet=secondary_facet,
         secondary_facet_value=secondary_facet_value,
+        alert_ids=alert_ids,
     )
 
     with get_db() as conn:
@@ -1063,7 +1115,7 @@ def get_suggestions(
         rows = conn.execute(
             f"""SELECT a.id, a.alert_id, a.timestamp, a.tenant, a.agent_name, a.agent_ip, a.rule_id, a.rule_level,
                        a.description, a.rule_groups, a.decoder, a.location, a.source_ip, a.mitre_ids, a.cve,
-                       a.log_signature, a.raw
+                       a.log_signature, a.raw, a.parsed_details
                 FROM wazuh.alerts a {where}
                 ORDER BY a.timestamp DESC NULLS LAST, a.id DESC LIMIT 300""",
             params,
@@ -1182,57 +1234,351 @@ def api_ai_test(payload: dict[str, Any]):
         raise HTTPException(status_code=502, detail=str(error)) from None
 
 
-@app.post("/api/ai/triage")
-def api_ai_triage(payload: dict[str, Any]):
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Payload AI triage tidak valid.")
-    try:
-        limit = int(payload.get("limit") or 40)
-        min_rule_level = int(payload.get("min_rule_level") or 7)
-    except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="limit dan min_rule_level harus berupa angka.") from None
-    if not 5 <= limit <= 100:
-        raise HTTPException(status_code=400, detail="limit harus antara 5 dan 100.")
-    if not 0 <= min_rule_level <= 15:
-        raise HTTPException(status_code=400, detail="min_rule_level harus antara 0 dan 15.")
-
-    tenant = payload.get("tenant") or ["all"]
-    where, params = alert_where(tenant=tenant, review_status=str(payload.get("review_status") or "unreviewed"))
+def _build_ai_triage_where(
+    tenant: Any,
+    review_status: str,
+    min_rule_level: int,
+    max_rule_level: int | None,
+) -> tuple[str, list[Any]]:
+    where, params = alert_where(tenant=tenant, review_status=review_status)
     level_clause = "a.rule_level >= %s"
+    level_params: list[Any] = [min_rule_level]
+    if max_rule_level is not None:
+        level_clause += " AND a.rule_level <= %s"
+        level_params.append(max_rule_level)
     if where:
         where = f"{where} AND {level_clause}"
     else:
         where = f"WHERE {level_clause}"
-    query_params = list(params) + [min_rule_level, limit]
+    return where, list(params) + level_params
+
+
+def _find_matching_open_ai_group(
+    conn,
+    *,
+    title: str,
+    group_tenant: str,
+    group_win_key: str,
+) -> str | None:
+    """Find an open AI incident group in the same tenant and 17:00 WIB cutoff window."""
+    candidates = conn.execute(
+        """SELECT id, title, created_at
+           FROM wazuh.analysis_groups
+           WHERE source = 'ai' AND status != 'closed' AND title = %s
+           ORDER BY created_at DESC""",
+        (title,),
+    ).fetchall()
+    for cand in candidates:
+        cid = cand["id"]
+        members = conn.execute(
+            """SELECT a.id, a.tenant, a.timestamp
+               FROM wazuh.alert_group_members m
+               JOIN wazuh.alerts a ON a.id = m.alert_pk
+               WHERE m.group_id = %s""",
+            (cid,),
+        ).fetchall()
+        if not members:
+            continue
+        member_tenants = {str(m["tenant"] or "Default") for m in members}
+        if member_tenants != {group_tenant}:
+            continue
+        member_windows = {wib_window_key(m.get("timestamp")) for m in members if wib_window_key(m.get("timestamp"))}
+        cand_win_key = next(iter(member_windows), "") or wib_window_key(cand.get("created_at"))
+        if group_win_key and cand_win_key and group_win_key != cand_win_key:
+            continue
+        return str(cid)
+    return None
+
+
+def _sync_triage_groups_with_saved_incidents(
+    conn,
+    groups: list[dict[str, Any]],
+    alerts_by_id: dict[str, dict[str, Any]],
+) -> None:
+    """If an open AI incident group already exists in the same 17:00 WIB window, auto-append new alerts."""
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        ids = [str(aid) for aid in (group.get("alert_ids") or []) if str(aid) in alerts_by_id]
+        pks = [int(aid) for aid in ids if aid.isdigit()]
+        if not pks:
+            continue
+        first_alert = alerts_by_id[ids[0]]
+        group_tenant = str(group.get("tenant") or first_alert.get("tenant") or "Default").strip() or "Default"
+        group_win_key = str(group.get("window_key") or wib_window_key(first_alert.get("timestamp")) or "")
+        title = str(group.get("title") or "").strip()[:200]
+        if not title:
+            continue
+        existing_id = _find_matching_open_ai_group(
+            conn,
+            title=title,
+            group_tenant=group_tenant,
+            group_win_key=group_win_key,
+        )
+        if existing_id:
+            for pk in pks:
+                conn.execute(
+                    "INSERT INTO wazuh.alert_group_members(alert_pk, group_id) VALUES(%s, %s) ON CONFLICT DO NOTHING",
+                    (pk, existing_id),
+                )
+            conn.execute(
+                "UPDATE wazuh.analysis_groups SET updated_at = now() WHERE id = %s",
+                (existing_id,),
+            )
+            group["saved_group_id"] = existing_id
+
+
+@app.get("/api/ai/triage")
+def api_get_ai_triage():
+    """Return the persisted AI triage state, automatically merging any new alerts within the 17:00 WIB window."""
+    with get_db() as conn:
+        state = load_document(conn, AI_TRIAGE_STATE_KEY, None)
+        if not isinstance(state, dict) or not isinstance(state.get("options"), dict):
+            return {"saved": False, "result": None}
+        options = state["options"]
+        tenant = options.get("tenant") or ["all"]
+        try:
+            limit = max(1, min(5000, int(options.get("limit") or 40)))
+            min_rule_level = max(0, min(16, int(options.get("min_rule_level") if options.get("min_rule_level") is not None else 7)))
+        except (TypeError, ValueError):
+            limit, min_rule_level = 40, 7
+        raw_max = options.get("max_rule_level")
+        max_rule_level = int(raw_max) if raw_max is not None and str(raw_max).strip() != "" else None
+        review_status = str(options.get("review_status") or "unreviewed")
+        group_by = str(options.get("group_by") or "rule_description")
+        if group_by not in {"host_rule", "rule_description"}:
+            group_by = "rule_description"
+
+        saved_ids = [int(aid) for aid in (state.get("alert_ids") or []) if str(aid).isdigit()]
+        existing_rows: list[dict[str, Any]] = []
+        if saved_ids:
+            t_clause, t_params = tenant_clause("a", tenant)
+            id_where = f"WHERE a.id = ANY(%s){f' AND {t_clause}' if t_clause else ''}"
+            existing_rows = conn.execute(
+                f"""SELECT a.id, a.alert_id, a.timestamp, a.tenant, a.agent_name, a.agent_ip,
+                           a.rule_id, a.rule_level, a.description, a.rule_groups, a.source_ip,
+                           a.mitre_ids, a.cve, a.hit_count, a.log_signature, a.parsed_details,
+                           a.data, COALESCE(a.raw->>'full_log', '') AS full_log
+                    FROM wazuh.alerts a {id_where}
+                    ORDER BY a.rule_level DESC NULLS LAST, a.timestamp DESC NULLS LAST, a.id DESC""",
+                [saved_ids, *t_params],
+            ).fetchall()
+
+        where, where_params = _build_ai_triage_where(tenant, review_status, min_rule_level, max_rule_level)
+        candidate_rows = conn.execute(
+            f"""SELECT a.id, a.alert_id, a.timestamp, a.tenant, a.agent_name, a.agent_ip,
+                       a.rule_id, a.rule_level, a.description, a.rule_groups, a.source_ip,
+                       a.mitre_ids, a.cve, a.hit_count, a.log_signature, a.parsed_details,
+                       a.data, COALESCE(a.raw->>'full_log', '') AS full_log
+                FROM wazuh.alerts a {where}
+                ORDER BY a.rule_level DESC NULLS LAST, a.timestamp DESC NULLS LAST, a.id DESC
+                LIMIT %s""",
+            [*where_params, limit],
+        ).fetchall()
+
+        existing_map = {str(r["id"]): {**r, "id": str(r["id"])} for r in existing_rows}
+        new_alerts: list[dict[str, Any]] = []
+        for r in candidate_rows:
+            aid = str(r["id"])
+            record = {**r, "id": aid}
+            if aid not in existing_map:
+                existing_map[aid] = record
+                new_alerts.append(record)
+
+        all_alerts = list(existing_map.values())
+        stored_settings = load_settings(conn)
+        ai = stored_settings.get("ai", {})
+        saved_groups = state.get("groups") if isinstance(state.get("groups"), list) else []
+        mode = str(state.get("mode") or "local_rules")
+        warning = state.get("warning")
+
+        if new_alerts:
+            inc_groups, inc_mode, inc_warn = triage_with_fallback(
+                new_alerts,
+                enabled=bool(ai.get("enabled")),
+                model=str(ai.get("model") or ""),
+                base_url=str(ai.get("base_url") or "http://127.0.0.1:11434"),
+                timeout=float(ai.get("timeout_seconds") or 90),
+                group_by=group_by,
+            )
+            groups = merge_triage_groups(saved_groups, inc_groups, existing_map)
+            mode = inc_mode
+            warning = inc_warn or warning
+        else:
+            groups = merge_triage_groups(saved_groups, [], existing_map)
+
+        _sync_triage_groups_with_saved_incidents(conn, groups, existing_map)
+        final_ids = [aid for g in groups for aid in (g.get("alert_ids") or []) if aid in existing_map]
+        final_ids_set = set(final_ids)
+        final_alerts = [a for a in all_alerts if a["id"] in final_ids_set] or all_alerts
+
+        updated_state = {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "window_key": current_wib_window_key(),
+            "options": {
+                "tenant": list(normalize_tenants(tenant)) or ["all"],
+                "limit": limit,
+                "min_rule_level": min_rule_level,
+                "max_rule_level": max_rule_level,
+                "review_status": review_status,
+                "group_by": group_by,
+            },
+            "mode": mode,
+            "warning": warning,
+            "model": ai.get("model"),
+            "alert_ids": list(dict.fromkeys(a["id"] for a in final_alerts)),
+            "groups": groups,
+        }
+        save_document(conn, AI_TRIAGE_STATE_KEY, updated_state)
+
+    return {
+        "saved": True,
+        "options": updated_state["options"],
+        "result": {
+            "mode": mode,
+            "warning": warning,
+            "model": ai.get("model"),
+            "alert_count": len(final_alerts),
+            "min_rule_level": min_rule_level,
+            "max_rule_level": max_rule_level,
+            "group_by": group_by,
+            "saved_at": updated_state["saved_at"],
+            "window_key": updated_state["window_key"],
+            "alerts": safe_alerts(final_alerts, limit=max(limit, len(final_alerts))),
+            "groups": groups,
+        },
+    }
+
+
+@app.post("/api/ai/triage")
+def api_ai_triage(payload: dict[str, Any]):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload AI triage tidak valid.")
+    raw_limit = payload.get("limit", 40)
+    raw_min_level = payload.get("min_rule_level", 7)
+    try:
+        limit = int(40 if raw_limit is None or raw_limit == "" else raw_limit)
+        min_rule_level = int(7 if raw_min_level is None or raw_min_level == "" else raw_min_level)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="limit dan min_rule_level harus berupa angka.") from None
+    if not 1 <= limit <= 5000:
+        raise HTTPException(status_code=400, detail="limit harus antara 1 dan 5000.")
+    if not 0 <= min_rule_level <= 16:
+        raise HTTPException(status_code=400, detail="min_rule_level harus antara 0 dan 16.")
+
+    raw_max_level = payload.get("max_rule_level")
+    max_rule_level: int | None = None
+    if raw_max_level is not None and str(raw_max_level).strip() != "":
+        try:
+            max_rule_level = int(raw_max_level)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="max_rule_level harus berupa angka.") from None
+        if not 0 <= max_rule_level <= 16 or max_rule_level < min_rule_level:
+            raise HTTPException(status_code=400, detail="max_rule_level tidak valid.")
+
+    group_by = str(payload.get("group_by") or "host_rule").strip()
+    if group_by not in {"host_rule", "rule_description"}:
+        raise HTTPException(status_code=400, detail="group_by harus berupa 'host_rule' atau 'rule_description'.")
+
+    tenant = payload.get("tenant") or ["all"]
+    review_status = str(payload.get("review_status") or "unreviewed")
+    norm_tenants = list(normalize_tenants(tenant)) or ["all"]
+    where, where_params = _build_ai_triage_where(tenant, review_status, min_rule_level, max_rule_level)
+    query_params = list(where_params) + [limit]
     with get_db() as conn:
         rows = conn.execute(
             f"""SELECT a.id, a.alert_id, a.timestamp, a.tenant, a.agent_name, a.agent_ip,
                        a.rule_id, a.rule_level, a.description, a.rule_groups, a.source_ip,
-                       a.mitre_ids, a.cve, a.hit_count, a.log_signature
+                       a.mitre_ids, a.cve, a.hit_count, a.log_signature, a.parsed_details,
+                       a.data, COALESCE(a.raw->>'full_log', '') AS full_log
                 FROM wazuh.alerts a {where}
                 ORDER BY a.rule_level DESC NULLS LAST, a.timestamp DESC NULLS LAST, a.id DESC
                 LIMIT %s""",
             query_params,
         ).fetchall()
         stored = load_settings(conn)
-    alerts = [{**row, "id": str(row["id"])} for row in rows]
-    ai = stored.get("ai", {})
-    groups, mode, warning = triage_with_fallback(
-        alerts,
-        enabled=bool(ai.get("enabled")),
-        model=str(ai.get("model") or ""),
-        base_url=str(ai.get("base_url") or "http://127.0.0.1:11434"),
-        timeout=float(ai.get("timeout_seconds") or 90),
-    )
-    if not ai.get("enabled") and not warning:
-        warning = "AI Triage belum diaktifkan di Pengaturan; hasil memakai heuristik lokal."
+        prev_state = load_document(conn, AI_TRIAGE_STATE_KEY, None)
+
+        alerts_map = {str(row["id"]): {**row, "id": str(row["id"])} for row in rows}
+        same_scope = False
+        prev_groups: list[dict[str, Any]] = []
+        if isinstance(prev_state, dict) and isinstance(prev_state.get("options"), dict):
+            prev_opts = prev_state["options"]
+            same_scope = (
+                (prev_opts.get("tenant") or ["all"]) == norm_tenants
+                and prev_opts.get("min_rule_level") == min_rule_level
+                and prev_opts.get("max_rule_level") == max_rule_level
+                and str(prev_opts.get("review_status") or "unreviewed") == review_status
+                and str(prev_opts.get("group_by") or "host_rule") == group_by
+            )
+            if same_scope:
+                prev_groups = prev_state.get("groups") if isinstance(prev_state.get("groups"), list) else []
+                missing_pks = [
+                    int(aid) for aid in (prev_state.get("alert_ids") or [])
+                    if str(aid).isdigit() and str(aid) not in alerts_map
+                ]
+                if missing_pks:
+                    extra_rows = conn.execute(
+                        f"""SELECT a.id, a.alert_id, a.timestamp, a.tenant, a.agent_name, a.agent_ip,
+                                   a.rule_id, a.rule_level, a.description, a.rule_groups, a.source_ip,
+                                   a.mitre_ids, a.cve, a.hit_count, a.log_signature, a.parsed_details,
+                                   a.data, COALESCE(a.raw->>'full_log', '') AS full_log
+                            FROM wazuh.alerts a {where} AND a.id = ANY(%s)""",
+                        [*where_params, missing_pks],
+                    ).fetchall()
+                    for r in extra_rows:
+                        alerts_map[str(r["id"])] = {**r, "id": str(r["id"])}
+
+        alerts = list(alerts_map.values())
+        ai = stored.get("ai", {})
+        fresh_groups, mode, warning = triage_with_fallback(
+            alerts,
+            enabled=bool(ai.get("enabled")),
+            model=str(ai.get("model") or ""),
+            base_url=str(ai.get("base_url") or "http://127.0.0.1:11434"),
+            timeout=float(ai.get("timeout_seconds") or 90),
+            group_by=group_by,
+        )
+        if same_scope and prev_groups and mode == prev_state.get("mode"):
+            groups = merge_triage_groups(prev_groups, fresh_groups, alerts_map)
+        else:
+            groups = fresh_groups
+
+        _sync_triage_groups_with_saved_incidents(conn, groups, alerts_map)
+
+        if not ai.get("enabled") and not warning:
+            warning = "AI Triage belum diaktifkan di Pengaturan; hasil memakai heuristik lokal."
+
+        saved_state = {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "window_key": current_wib_window_key(),
+            "options": {
+                "tenant": norm_tenants,
+                "limit": limit,
+                "min_rule_level": min_rule_level,
+                "max_rule_level": max_rule_level,
+                "review_status": review_status,
+                "group_by": group_by,
+            },
+            "mode": mode,
+            "warning": warning,
+            "model": ai.get("model"),
+            "alert_ids": [a["id"] for a in alerts],
+            "groups": groups,
+        }
+        save_document(conn, AI_TRIAGE_STATE_KEY, saved_state)
+
     return {
         "mode": mode,
         "warning": warning,
         "model": ai.get("model"),
         "alert_count": len(alerts),
         "min_rule_level": min_rule_level,
-        "alerts": safe_alerts(alerts),
+        "max_rule_level": max_rule_level,
+        "group_by": group_by,
+        "saved_at": saved_state["saved_at"],
+        "window_key": saved_state["window_key"],
+        "alerts": safe_alerts(alerts, limit=max(limit, len(alerts))),
         "groups": groups,
     }
 
@@ -1241,9 +1587,9 @@ def api_ai_triage(payload: dict[str, Any]):
 def api_ai_triage_save(payload: dict[str, Any]):
     """Persist an AI triage result as editable incident groups (source='ai').
 
-    Each group becomes an ``analysis_groups`` row with its TP/FP/needs_review
-    verdict, the model's reasoning, and its member alerts. The analyst can then
-    add/remove alerts or delete the group from the Insiden page.
+    If an open AI incident group already exists for the same tenant, title, and
+    17:00 WIB cutoff window, new member alerts are merged into that existing case
+    group rather than creating a duplicate. Alerts after 17:00 WIB open a new case.
     """
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload penyimpanan triage tidak valid.")
@@ -1265,21 +1611,84 @@ def api_ai_triage_save(payload: dict[str, Any]):
             title = str(group.get("title") or f"AI Triage {index + 1}").strip()[:200] or f"AI Triage {index + 1}"
             category = str(group.get("category") or "AI Triage")[:120]
             reason = str(group.get("reason") or "")[:400]
-            group_id = uuid.uuid4()
             pks = _validate_membership(conn, group.get("alert_ids") or [], tenant)
+            group_tenant = "Default"
+            group_win_key = str(group.get("window_key") or "").strip()
+            if pks:
+                t_rows = conn.execute(
+                    "SELECT a.id, a.tenant, a.timestamp FROM wazuh.alerts a WHERE a.id = ANY(%s)",
+                    [pks],
+                ).fetchall()
+                distinct_tenants = {str(r["tenant"] or "Default") for r in t_rows}
+                if len(distinct_tenants) > 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Satu grup kasus tidak boleh menggabungkan 2 tenant atau lebih.",
+                    )
+                if distinct_tenants:
+                    group_tenant = next(iter(distinct_tenants))
+                alert_windows = {wib_window_key(r.get("timestamp")) for r in t_rows if wib_window_key(r.get("timestamp"))}
+                if len(alert_windows) > 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Satu grup kasus tidak boleh menggabungkan alert melewati batas jam 17.00 WIB.",
+                    )
+                if not group_win_key and alert_windows:
+                    group_win_key = next(iter(alert_windows))
+
             severity = {"tp": "high", "fp": "low", "needs_review": "medium"}.get(verdict, "medium")
-            conn.execute(
-                """INSERT INTO wazuh.analysis_groups(
-                    id, title, category, analysis, conclusion, recommendation, status, severity, source, verdict
-                ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (group_id, title, category, reason, "", "", "open", severity, "ai", verdict),
+            existing_id = _find_matching_open_ai_group(
+                conn,
+                title=title,
+                group_tenant=group_tenant,
+                group_win_key=group_win_key,
             )
-            for pk in pks:
+            if existing_id:
                 conn.execute(
-                    "INSERT INTO wazuh.alert_group_members(alert_pk, group_id) VALUES(%s, %s) ON CONFLICT DO NOTHING",
-                    (pk, group_id),
+                    """UPDATE wazuh.analysis_groups
+                       SET category = %s, analysis = %s, severity = %s, verdict = %s, updated_at = now()
+                       WHERE id = %s""",
+                    (category, reason, severity, verdict, existing_id),
                 )
-            saved.append({"id": str(group_id), "title": title, "verdict": verdict, "alert_count": len(pks)})
+                for pk in pks:
+                    conn.execute(
+                        "INSERT INTO wazuh.alert_group_members(alert_pk, group_id) VALUES(%s, %s) ON CONFLICT DO NOTHING",
+                        (pk, existing_id),
+                    )
+                count_row = conn.execute(
+                    "SELECT count(*) AS n FROM wazuh.alert_group_members WHERE group_id = %s",
+                    (existing_id,),
+                ).fetchone()
+                total_members = int(count_row["n"]) if count_row else len(pks)
+                saved.append({
+                    "id": str(existing_id),
+                    "title": title,
+                    "verdict": verdict,
+                    "alert_count": total_members,
+                    "merged": True,
+                    "window_key": group_win_key,
+                })
+            else:
+                group_id = uuid.uuid4()
+                conn.execute(
+                    """INSERT INTO wazuh.analysis_groups(
+                        id, title, category, analysis, conclusion, recommendation, status, severity, source, verdict
+                    ) VALUES(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (group_id, title, category, reason, "", "", "open", severity, "ai", verdict),
+                )
+                for pk in pks:
+                    conn.execute(
+                        "INSERT INTO wazuh.alert_group_members(alert_pk, group_id) VALUES(%s, %s) ON CONFLICT DO NOTHING",
+                        (pk, group_id),
+                    )
+                saved.append({
+                    "id": str(group_id),
+                    "title": title,
+                    "verdict": verdict,
+                    "alert_count": len(pks),
+                    "merged": False,
+                    "window_key": group_win_key,
+                })
     if not saved:
         raise HTTPException(status_code=400, detail="Tidak ada grup valid untuk disimpan.")
     return {"saved": saved, "count": len(saved)}

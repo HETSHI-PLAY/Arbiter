@@ -18,7 +18,9 @@
 
 **Arbiter** is an open-source, airgapped SOC investigation desk built to bridge the gap between raw **Wazuh SIEM alerts** and **executive incident reporting**.
 
-When investigating high-volume attacks (credential stuffing, SSH brute-force, web vulnerability probing), raw Wazuh Elasticsearch JSON exports often flood analysts with tens of thousands of repetitive log lines. Arbiter normalizes multi-format logs, deduplicates recurring attacks using stable hashing, enriches source IPs with local Threat Intelligence, and produces **Google Docs**, **Word (.docx)**, and **Excel (.xlsx)** deliverables in one click.
+When investigating high-volume attacks (credential stuffing, SSH brute-force, web vulnerability probing), raw Wazuh Elasticsearch JSON exports often flood analysts with tens of thousands of repetitive log lines. Arbiter normalizes multi-format logs, **reads nested Wazuh structures**, **classifies each event with auditable local rules**, **links Active Response events back to their origin alert**, deduplicates recurring attacks using stable hashing, enriches source IPs with local Threat Intelligence, and produces **Google Docs**, **Word (.docx)**, and **Excel (.xlsx)** deliverables in one click.
+
+The architecture is documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): data contracts, classification policy, correlation rules, storage, failure modes, and dataset-derived calibration.
 
 ---
 
@@ -36,10 +38,14 @@ When investigating high-volume attacks (credential stuffing, SSH brute-force, we
   - **Syslog & Auth Logs**: OpenSSH (`sshd`), PAM authentication failures, session lifecycle.
   - **Linux Kernel & Audit**: AppArmor profiles, syscall audit events.
   - **Embedded HTTP & JSON Payloads**: Auto-detects URLs, methods, and status codes inside generic syslog lines.
+- **Nested Wazuh readers**: extracts the origin alert from Active Response (`data.parameters.alert` or JSON in `full_log`) and reads Vulnerability Detector metadata (`data.vulnerability`).
+- **Role separation**: a containment event (rule 651/652) is `role=response`, not an independent attack; routine admin/vulnerability events are `role=context`.
 
-### 3. Signature-Based Deduplication
+### 3. Signature-Based Deduplication & Causal Correlation
 - Computes a stable SHA-256 signature across `(tenant, agent, rule_id, srcip, normalized_log)`.
 - Condenses thousands of repetitive scans into a single triage row with `Hit Count` and `first_seen → last_seen` time range.
+- **Response linkage**: Active Response alerts are attached to the alert that triggered them, so 651/652 do not inflate the queue.
+- **Host + rule correlation**: rotating source IPs collapse into one target group; source IPs remain facets. Ordered chains expose multi-rule sequences such as invalid SSH user → successful login → sudo → crontab change.
 
 ### 4. Enterprise Multi-Tenant Architecture
 - Automatic tenant extraction from `agent.labels.tenant`.
@@ -89,6 +95,50 @@ Arbiter uses a **Quiet Evidence Desk** design with focused destinations instead 
 
 ---
 
+## 🧠 Wazuh Read → Classify → Correlate
+
+Arbiter's deterministic intelligence layer lives in `app/wazuh_intel.py`. It is
+local, rule-based, and auditable: every verdict carries the signals that
+produced it.
+
+| Stage | What happens | Output |
+|---|---|---|
+| **Read** | Parse ES hits, JSONL, paste, Active Response JSON, Vulnerability Detector metadata. | Normalized alert + nested origin. |
+| **Classify** | Rule profile + groups + severity + context. Unknown rules stay `needs_review`. | `verdict`, `role`, `priority`, `confidence`, `signals`, `reason`. |
+| **Correlate** | Link responses to origins; cluster by host + rule; collect source IPs as facets; order stages. | Canonical groups + `chain` + response evidence. |
+| **Triage** | Review status, filters, selection, incident cases. | Scoped evidence and case narrative. |
+| **Deliver** | HTML, DOCX, XLSX, TSV, Markdown. | Bounded, scoped, redaction-aware output. |
+
+### Verdict semantics that avoid false certainty
+
+- `tp` — a real suspicious activity **according to explicit rule/context evidence**.
+- `fp` — routine, expected, or derived noise (for example a log rotation or an Active Response containment event).
+- `needs_review` — insufficient evidence; this is the default for unmapped rules.
+- `role=response` means the event is **derived** from another alert. It is `fp`
+  as a standalone alert but carries `origin_verdict` and is attached to the
+  origin group.
+- A known-bad IP or high severity raises **priority**, never invents a verdict.
+- No state is ever labelled "Clean", "Aman", or "Safe".
+
+### Dataset calibration and limits
+
+The design was validated against 738 labelled alerts (239 TP / 499 FP), 606
+event-to-case examples, and 10,000 synthetic triage rows. Two findings changed
+the architecture:
+
+1. **63% of the labelled alerts are Active Response events (rules 651/652).**
+   Treating them as independent attacks inflates the queue and hides the origin.
+   Arbiter now extracts and links the embedded origin alert.
+2. **The synthetic triage labels are severity-threshold driven** (IGNORE ≤5,
+   MONITOR 6–10, ESCALATE ≥12 + known-bad). They calibrate priority, not
+   semantics. Arbiter therefore keeps semantic rule profiles explicit and sends
+   unknown high-severity rules to `needs_review`.
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full data contracts,
+classification policy, correlation rules, and failure modes.
+
+---
+
 ## 🛠️ Architecture & Tech Stack
 
 ```
@@ -98,6 +148,7 @@ app/
 ├── query.py                        # SQL query builder with filter presets
 ├── database.py                     # PostgreSQL layer + schema migration
 ├── parser.py                       # Multi-format log dissector
+├── wazuh_intel.py                  # Read nested alerts, classify, correlate
 ├── core.py                         # Normalization, deduplication, correlation
 ├── privacy.py                      # Deterministic redactor
 ├── exports.py                      # .docx, .xlsx, Markdown, HTML, TSV
@@ -167,27 +218,33 @@ cp .env.example .env
 
 ## 📖 SOC Analyst Quickstart Workflow
 
-1. **Navigate to Impor** (`#/imports`) — paste your raw Wazuh / Elasticsearch JSON or upload `.json`/`.txt` files. Alerts are parsed, deduplicated, and enriched.
+1. **Navigate to Impor** (`#/imports`) — paste your raw Wazuh / Elasticsearch JSON or upload `.json`/`.txt` files. Alerts are parsed, nested Active Response origins are read, classified, deduplicated, and enriched.
 
 2. **Select Tenant** — use the workspace selector in the utility bar to isolate by tenant (e.g. `wicida`, `sgu`) or view all tenants.
 
-3. **Triage** (`#/triage`) — filter with presets (403, 404 Probes, Bot, Curl, Repeating), sort by severity/time/hits. Click any alert to open the sidebar inspector with full details and IP intel.
+3. **Triage** (`#/triage`) — filter with presets (403, 404 Probes, Bot, Curl, Repeating), sort by severity/time/hits. Click any alert to open the sidebar inspector with full details, nested origin, classification signals, and IP intel.
 
-4. **Group into Incident** — Shift+Click to select alerts, click "Buat insiden" on the selection toolbar. Add title, category, severity, analysis, conclusion, and recommendation.
+4. **Review correlation** — click **Korelasi** to see host+rule groups, linked Active Response evidence, source-IP facets, and ordered stages. Responses stay attached to their origin instead of appearing as separate attacks.
 
-5. **Export** (`#/reports`) — choose scope (current filter or selected alerts), pick format (Clipboard HTML, .docx, .xlsx, TSV, Markdown), and export.
+5. **Group into Incident** — Shift+Click to select alerts, click "Buat insiden" on the selection toolbar. Add title, category, severity, analysis, conclusion, and recommendation.
+
+6. **Export** (`#/reports`) — choose scope (current filter or selected alerts), pick format (Clipboard HTML, .docx, .xlsx, TSV, Markdown), and export.
 
 ---
 
 ## 🧪 Testing & Quality Assurance
 
 ```bash
-# Frontend tests (125 tests)
+# Frontend tests (via npm — see package.json)
+npm test
+# or directly:
 node --test tests/frontend/*.test.mjs
 
-# Backend tests — safe isolated suites (92 tests)
-.venv/bin/python -m unittest tests.test_parser tests.test_exports \
-  tests.test_privacy tests.test_dedup tests.test_ui_api tests.test_ui_safety tests.test_settings -q
+# Backend tests — safe isolated suites
+.venv/bin/python -m unittest tests.test_wazuh_intel tests.test_parser \
+  tests.test_exports tests.test_privacy tests.test_dedup tests.test_ui_api \
+  tests.test_ui_safety tests.test_settings tests.test_stats \
+  tests.test_triage_scope tests.test_database_trust tests.test_ai_triage
 
 # Design system lint
 npx -y @google/design.md@0.4.0 lint docs/ui-ux-redesign/DESIGN.md

@@ -222,6 +222,88 @@ class SettingsAPITests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertNotIn("SyntheticSecret123", token)
 
+    # ── Wazuh timestamp normalization (fixes HTTP 400 on the since range) ──
+
+    def test_wazuh_timestamp_normalization_collapses_colon_offset(self):
+        from app.settings import _normalize_wazuh_timestamp, _valid_timestamp
+        # Python isoformat emits +00:00; Wazuh Indexer's date parser wants +0000.
+        self.assertEqual(
+            _normalize_wazuh_timestamp("2026-11-06T01:12:41.963193+00:00"),
+            "2026-11-06T01:12:41.963193+0000",
+        )
+        self.assertEqual(
+            _normalize_wazuh_timestamp("2026-11-06T01:12:41.963193-07:30"),
+            "2026-11-06T01:12:41.963193-0730",
+        )
+        # A 'Z' suffix and a colonless offset are left untouched.
+        self.assertEqual(_normalize_wazuh_timestamp("2026-11-06T01:12:41Z"), "2026-11-06T01:12:41Z")
+        self.assertEqual(_normalize_wazuh_timestamp("2026-11-06T01:12:41.963193+0000"), "2026-11-06T01:12:41.963193+0000")
+
+    def test_wazuh_valid_timestamp_guards_garbage(self):
+        from app.settings import _valid_timestamp
+        self.assertTrue(_valid_timestamp("2026-11-06T01:12:41.963193+0000"))
+        self.assertTrue(_valid_timestamp("2026-11-06T01:12:41Z"))
+        self.assertFalse(_valid_timestamp(""))
+        self.assertFalse(_valid_timestamp("not-a-date"))
+
+    def test_wazuh_search_sends_normalized_since_timestamp(self):
+        import json as json_module
+        from app.settings import wazuh_search
+
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+            def read(self, limit):
+                return b'{"hits":{"hits":[]}}'
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+
+        class FakeOpener200:
+            def open(self, request, timeout):
+                captured["request"] = request
+                return FakeResponse()
+
+        with patch("app.settings._wazuh_opener", return_value=FakeOpener200()):
+            wazuh_search(
+                indexer_url="https://wazuh.lab:9200",
+                username="analyst",
+                password="secret",
+                index_pattern="wazuh-alerts-*",
+                verify_tls=True,
+                size=10,
+                since="2026-11-06T01:12:41.963193+00:00",
+            )
+        sent = json_module.loads(captured["request"].data.decode("utf-8"))
+        self.assertEqual(
+            sent["query"]["range"]["timestamp"]["gte"],
+            "2026-11-06T01:12:41.963193+0000",
+        )
+        self.assertNotIn("+00:00", json_module.dumps(sent))
+
+    def test_wazuh_http_error_reason_surfaces_upstream_body(self):
+        from app.settings import _http_error_reason
+        import urllib.error as urlerror
+
+        class FakeHTTPError(urlerror.HTTPError):
+            def __init__(self):
+                super().__init__("https://wazuh.lab:9200", 400, "Bad Request", None, None)
+                self._body = b'{"error":{"reason":"failed to parse date field"}}'
+
+            def read(self, limit=None):
+                return self._body
+
+        err = FakeHTTPError()
+        try:
+            self.assertEqual(
+                _http_error_reason(err),
+                " failed to parse date field",
+            )
+        finally:
+            err.close()
+
 
 if __name__ == "__main__":
     unittest.main()

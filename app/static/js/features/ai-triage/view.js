@@ -1,28 +1,48 @@
-import {json} from '../../api/client.js';
+import {json, copyText} from '../../api/client.js';
 import {esc, icon, severity, formatTime, emptyState, errorState, loadingRows} from '../../ui/primitives.js';
 import {queryFrom, tenantValues} from '../../state/scope.js';
 import {withParams} from '../../router.js';
 import {normalizeSettings} from '../settings/model.js';
 import {
-  LIMITS, MIN_LEVELS, REVIEW_STATUSES,
-  alertFacts, alertIndex, boundedInteger, groupAlerts, modeMeta,
-  normalizeTriageResult, numericAlertIds, summarizeGroups, triageOptions, verdictMeta,
+  GROUP_BY_OPTIONS, MIN_LIMIT, MAX_LIMIT, MIN_LEVELS, REVIEW_STATUSES,
+  aiSeverityKey, alertFacts, alertIndex, boundedInteger, formatWibWindowLabel, groupAlerts, modeMeta,
+  normalizeTriageResult, numericAlertIds, parseSeveritySelection, summarizeGroups, triageOptions, verdictMeta,
 } from './model.js';
-
-const MAX_VISIBLE_ALERTS = 100;
 
 export async function mount(ctx) {
   const {root, route, signal, notify} = ctx;
   const routeQuery = queryFrom(route.params);
   const initial = triageOptions(route.params);
+  const initialTenants = tenantValues(route.params);
+  const state = {
+    tenantValue: routeQuery.tenantScope.all ? 'all' : initialTenants.join(','),
+    severitySelection: initial.severitySelection,
+    limit: initial.limit,
+    reviewStatus: initial.reviewStatus,
+    groupBy: initial.groupBy,
+  };
+  let tenantList = [];
   let settings = normalizeSettings(null);
   let result = null;
   let running = false;
   let saving = false;
 
-  const scopedRoute = (path, extra = {}) => {
+  const activeTenants = () => {
+    if (!state.tenantValue || state.tenantValue === 'all') return ['all'];
+    const parts = String(state.tenantValue).split(',').map(item => item.trim()).filter(Boolean);
+    return parts.length ? parts : ['all'];
+  };
+
+  const activeTenantLabel = () => {
+    const list = activeTenants();
+    if (list.length === 1 && list[0] === 'all') return 'Semua tenant';
+    return list.join(', ');
+  };
+
+  const scopedRoute = (path, extra = {}, overrideTenant = '') => {
     const params = new URLSearchParams();
-    for (const tenant of tenantValues(route.params)) params.append('tenant', tenant);
+    const tenants = overrideTenant && overrideTenant !== 'Default' ? [overrideTenant] : activeTenants();
+    for (const tenant of tenants) params.append('tenant', tenant);
     for (const [key, value] of Object.entries(extra)) {
       if (value === undefined || value === null || value === '') params.delete(key);
       else params.set(key, String(value));
@@ -30,26 +50,55 @@ export async function mount(ctx) {
     return withParams(path, params);
   };
 
+  function tenantOptionsHTML() {
+    const known = new Map();
+    for (const row of tenantList) {
+      const name = String(row?.tenant || '').trim();
+      if (name) known.set(name, row?.count);
+    }
+    for (const name of routeQuery.tenantScope.tenants) {
+      if (name && !known.has(name)) known.set(name, undefined);
+    }
+    const multiScopeOption = routeQuery.tenantScope.tenants.length > 1
+      ? `<option value="${esc(routeQuery.tenantScope.tenants.join(','))}" ${state.tenantValue === routeQuery.tenantScope.tenants.join(',') ? 'selected' : ''}>${esc(routeQuery.tenantScope.label)}</option>`
+      : '';
+    const options = [...known.entries()].map(([name, count]) => {
+      const countText = Number.isFinite(Number(count)) ? ` (${Number(count).toLocaleString('id-ID')})` : '';
+      return `<option value="${esc(name)}" ${state.tenantValue === name ? 'selected' : ''}>${esc(name)}${countText}</option>`;
+    }).join('');
+    return `<option value="all" ${state.tenantValue === 'all' ? 'selected' : ''}>Semua tenant</option>${multiScopeOption}${options}`;
+  }
+
   function renderControls() {
     const ai = settings.ai;
     return `
       <form class="ai-controls" id="ai-triage-form">
         <div class="field">
+          <label for="ai-tenant">Tenant</label>
+          <select class="select" id="ai-tenant" name="tenant">
+            ${tenantOptionsHTML()}
+          </select>
+        </div>
+        <div class="field">
           <label for="ai-min-level">Ambang severity</label>
           <select class="select" id="ai-min-level" name="min_rule_level">
-            ${MIN_LEVELS.map(([value, label]) => `<option value="${value}" ${initial.minRuleLevel === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+            ${MIN_LEVELS.map(([value, label]) => `<option value="${esc(value)}" ${String(state.severitySelection) === String(value) ? 'selected' : ''}>${esc(label)}</option>`).join('')}
           </select>
         </div>
         <div class="field">
           <label for="ai-limit">Maksimum alert</label>
-          <select class="select" id="ai-limit" name="limit">
-            ${LIMITS.map(value => `<option value="${value}" ${initial.limit === value ? 'selected' : ''}>${value} alert</option>`).join('')}
-          </select>
+          <input class="input" id="ai-limit" name="limit" type="number" min="${MIN_LIMIT}" max="${MAX_LIMIT}" step="1" value="${esc(state.limit)}" placeholder="40" required>
         </div>
         <div class="field">
           <label for="ai-review-status">Status review</label>
           <select class="select" id="ai-review-status" name="review_status">
-            ${REVIEW_STATUSES.map(([value, label]) => `<option value="${value}" ${initial.reviewStatus === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+            ${REVIEW_STATUSES.map(([value, label]) => `<option value="${value}" ${state.reviewStatus === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label for="ai-group-by">Dasar pengelompokan</label>
+          <select class="select" id="ai-group-by" name="group_by">
+            ${GROUP_BY_OPTIONS.map(([value, label]) => `<option value="${esc(value)}" ${state.groupBy === value ? 'selected' : ''}>${esc(label)}</option>`).join('')}
           </select>
         </div>
         <div class="field ai-run-field">
@@ -69,12 +118,15 @@ export async function mount(ctx) {
 
   function renderSummary(data, counts, mode) {
     const meta = modeMeta(mode);
+    const levelLabel = Number.isInteger(data.maxRuleLevel)
+      ? `${data.minRuleLevel}–${data.maxRuleLevel}`
+      : `≥ ${data.minRuleLevel}`;
     return `
       <section class="ai-summary" aria-label="Ringkasan hasil triage">
         <div class="ai-summary-head">
           <div>
             <span class="badge ${meta.badge}">${esc(meta.label)}</span>
-            <span class="meta">${data.alertCount.toLocaleString('id-ID')} alert · rule.level ≥ ${data.minRuleLevel}</span>
+            <span class="meta">${data.alertCount.toLocaleString('id-ID')} alert · rule.level ${levelLabel}</span>
           </div>
           <span class="meta">${data.model ? `Model ${esc(data.model)}` : 'Tanpa model eksternal'}</span>
         </div>
@@ -98,7 +150,7 @@ export async function mount(ctx) {
             ${records.map(alert => {
               const facts = alertFacts(alert);
               return `<tr>
-                <td>${severity(alert.rule_level)}</td>
+                <td>${severity(aiSeverityKey(alert.rule_level))}</td>
                 <td class="mono">${esc(formatTime(alert.timestamp))}</td>
                 <td><span class="mono">${esc(alert.agent_name || '—')}</span>${alert.source_ip ? `<br><span class="meta mono">${esc(alert.source_ip)}</span>` : ''}</td>
                 <td><span class="ai-alert-desc">${esc(alert.description || 'Tanpa deskripsi')}</span>${facts.length ? `<br><span class="meta">${esc(facts.join(' · '))}</span>` : ''}</td>
@@ -114,17 +166,28 @@ export async function mount(ctx) {
     const meta = verdictMeta(group.verdict);
     const records = groupAlerts(group, index);
     const first = records[0];
+    const groupTenant = String(group.tenant || first?.tenant || '').trim();
+    const winLabel = formatWibWindowLabel(group.windowKey);
+    const newCount = Array.isArray(group.newAlertIds) ? group.newAlertIds.length : 0;
     const incidentIds = numericAlertIds(group, index);
-    const alertsHref = first ? scopedRoute('/triage', {alert: first.id}) : scopedRoute('/triage');
-    const incidentHref = incidentIds.length ? scopedRoute('/incidents/new', {alert_ids: incidentIds.join(',')}) : '';
+    const alertsHref = incidentIds.length
+      ? scopedRoute('/triage', {alert_ids: incidentIds.join(','), review_status: 'all', alert: first?.id}, groupTenant)
+      : first
+        ? scopedRoute('/triage', {alert: first.id}, groupTenant)
+        : scopedRoute('/triage', {}, groupTenant);
+    const incidentHref = incidentIds.length ? scopedRoute('/incidents/new', {alert_ids: incidentIds.join(',')}, groupTenant) : '';
     return `
       <article class="ai-group" aria-labelledby="ai-group-${position}">
         <div class="ai-group-head">
           <div>
-            <span class="meta">${esc(group.category)}</span>
+            <span class="meta">${esc(group.category)}${groupTenant ? ` · Tenant ${esc(groupTenant)}` : ''}${winLabel ? ` · Batas grup ${esc(winLabel)}` : ''}</span>
             <h3 id="ai-group-${position}">${esc(group.title)}</h3>
           </div>
-          <span class="badge ${meta.badge}">${esc(meta.label)}</span>
+          <div>
+            ${newCount > 0 ? `<span class="badge success">+${newCount.toLocaleString('id-ID')} alert baru</span> ` : ''}
+            ${group.savedGroupId ? `<a class="badge neutral" href="#/incidents/${esc(group.savedGroupId)}">Tersimpan di Insiden</a> ` : ''}
+            <span class="badge ${meta.badge}">${esc(meta.label)}</span>
+          </div>
         </div>
         <p class="ai-group-reason">${esc(group.reason)}</p>
         <div class="ai-group-meta">
@@ -137,6 +200,7 @@ export async function mount(ctx) {
         </details>
         <div class="ai-group-actions">
           <a class="button" href="${alertsHref}">${icon('arrow')} Buka di Triage</a>
+          <button class="button" type="button" data-action="copy-group-logs" data-group-index="${position}">${icon('copy')} Salin full log (${records.length})</button>
           ${incidentHref
             ? `<a class="button primary" href="${incidentHref}">${icon('plus')} Siapkan insiden (${incidentIds.length})</a>`
             : '<button class="button" type="button" disabled>Siapkan insiden</button>'}
@@ -179,7 +243,7 @@ export async function mount(ctx) {
           <div class="split">
             <div>
               <h2 class="section-heading">Jalankan triage</h2>
-              <p class="meta">Scope tenant mengikuti workspace: <strong>${esc(routeQuery.tenantScope.label)}</strong>. Halaman ini tidak mengubah status review atau menyimpan alert baru.</p>
+              <p class="meta">Scope tenant: <strong id="ai-tenant-label">${esc(activeTenantLabel())}</strong>. Halaman ini tidak mengubah status review atau menyimpan alert baru.</p>
             </div>
             <span class="badge ${settings.ai.enabled ? 'success' : 'warning'}"><span class="status-dot"></span>${settings.ai.enabled ? 'AI lokal aktif' : 'Heuristik lokal'}</span>
           </div>
@@ -199,9 +263,18 @@ export async function mount(ctx) {
     if (running) return;
     const form = root.querySelector('#ai-triage-form');
     if (!form) return;
-    const limit = boundedInteger(form.elements.limit.value, 40, 5, 100);
-    const minRuleLevel = boundedInteger(form.elements.min_rule_level.value, 7, 0, 15);
+    const tenantField = form.elements.tenant?.value || state.tenantValue || 'all';
+    const limit = boundedInteger(form.elements.limit.value, 40, MIN_LIMIT, MAX_LIMIT);
+    const parsedLevel = parseSeveritySelection(form.elements.min_rule_level.value);
+    const minRuleLevel = parsedLevel.minRuleLevel;
+    const maxRuleLevel = parsedLevel.maxRuleLevel;
     const reviewStatus = form.elements.review_status.value;
+    const groupBy = form.elements.group_by?.value || state.groupBy || 'rule_description';
+    state.tenantValue = tenantField;
+    state.limit = limit;
+    state.severitySelection = parsedLevel.selection;
+    state.reviewStatus = reviewStatus;
+    state.groupBy = groupBy;
     running = true;
     const button = form.querySelector('button[type=submit]');
     const status = root.querySelector('#ai-status');
@@ -213,10 +286,12 @@ export async function mount(ctx) {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
-          tenant: tenantValues(route.params),
+          tenant: activeTenants(),
           limit,
           min_rule_level: minRuleLevel,
+          max_rule_level: maxRuleLevel,
           review_status: reviewStatus,
+          group_by: groupBy,
         }),
         signal,
         timeout: Math.max(120000, (Number(settings.ai.timeout_seconds) || 90) * 1000),
@@ -237,6 +312,36 @@ export async function mount(ctx) {
     }
   }
 
+  async function copyGroupLogs(group, index) {
+    const ids = numericAlertIds(group, index);
+    if (!ids.length) { notify('Grup ini tidak punya alert dengan ID valid untuk disalin.', 'error'); return; }
+    const params = new URLSearchParams();
+    for (const tenant of activeTenants()) params.append('tenant', tenant);
+    const status = root.querySelector('#ai-status');
+    if (status) { status.textContent = `Mengambil ${ids.length} full log…`; status.dataset.kind = 'info'; }
+    try {
+      const body = await json(`/api/alerts/full-logs?${params}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({alert_ids: ids}),
+        signal,
+        timeout: 30000,
+      });
+      const items = Array.isArray(body.items) ? body.items : [];
+      const text = items.map(a => {
+        const head = `Alert #${a.id} · ${a.description || 'Tanpa deskripsi'} · Sumber ${a.source_ip || '—'} · Rule ${a.rule_id || '—'}`;
+        return `${head}\n${a.full_log || '(full log tidak tersedia)'}`;
+      }).join('\n\n---\n\n');
+      if (!text) { notify('Tidak ada full log yang dapat disalin.', 'error'); return; }
+      await copyText(text);
+      if (status) { status.textContent = `${items.length} full log disalin ke clipboard.`; status.dataset.kind = 'success'; }
+      notify(`${items.length} full log disalin.`, 'success');
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      if (status) { status.textContent = error.message; status.dataset.kind = 'error'; }
+    }
+  }
+
   async function save() {
     if (saving || !result?.groups?.length) return;
     saving = true;
@@ -249,13 +354,14 @@ export async function mount(ctx) {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({
-          tenant: tenantValues(route.params),
+          tenant: activeTenants(),
           groups: result.groups.map(group => ({
             title: group.title,
             category: group.category,
             verdict: group.verdict,
             reason: group.reason,
             alert_ids: group.alertIds,
+            window_key: group.windowKey || '',
           })),
         }),
         signal,
@@ -273,6 +379,24 @@ export async function mount(ctx) {
     }
   }
 
+  root.addEventListener('change', event => {
+    const form = root.querySelector('#ai-triage-form');
+    if (!form || !form.contains(event.target)) return;
+    if (event.target.name === 'tenant') {
+      state.tenantValue = event.target.value || 'all';
+      const label = root.querySelector('#ai-tenant-label');
+      if (label) label.textContent = activeTenantLabel();
+    } else if (event.target.name === 'min_rule_level') {
+      state.severitySelection = parseSeveritySelection(event.target.value).selection;
+    } else if (event.target.name === 'limit') {
+      state.limit = boundedInteger(event.target.value, 40, MIN_LIMIT, MAX_LIMIT);
+    } else if (event.target.name === 'review_status') {
+      state.reviewStatus = event.target.value;
+    } else if (event.target.name === 'group_by') {
+      state.groupBy = event.target.value;
+    }
+  }, {signal});
+
   root.addEventListener('submit', event => {
     if (event.target.id !== 'ai-triage-form') return;
     event.preventDefault();
@@ -283,12 +407,34 @@ export async function mount(ctx) {
     const action = event.target.closest('[data-action]')?.dataset.action;
     if (action === 'run-inline') run();
     if (action === 'save') save();
+    if (action === 'copy-group-logs') {
+      const position = Number(event.target.closest('[data-action=copy-group-logs]')?.dataset.groupIndex);
+      const group = result?.groups?.[position];
+      if (group) copyGroupLogs(group, alertIndex(result.alerts));
+    }
   }, {signal});
 
   root.innerHTML = loadingRows(4);
   try {
-    const body = await json('/api/settings', {signal, timeout: 15000});
-    settings = normalizeSettings(body.settings);
+    const [settingsBody, tenantsBody, savedTriage] = await Promise.all([
+      json('/api/settings', {signal, timeout: 15000}),
+      json('/api/tenants', {signal, timeout: 10000}).catch(() => ({tenants: []})),
+      json('/api/ai/triage', {signal, timeout: 20000}).catch(() => ({saved: false, result: null})),
+    ]);
+    settings = normalizeSettings(settingsBody.settings);
+    tenantList = Array.isArray(tenantsBody?.tenants) ? tenantsBody.tenants : [];
+    if (savedTriage?.saved && savedTriage.result) {
+      result = normalizeTriageResult(savedTriage.result);
+      const savedOpts = triageOptions(savedTriage.options || {});
+      const getParam = key => route.params?.get ? route.params.get(key) : route.params?.[key];
+      if (!getParam('tenant') && Array.isArray(savedTriage.options?.tenant) && savedTriage.options.tenant.length) {
+        state.tenantValue = savedTriage.options.tenant.includes('all') ? 'all' : savedTriage.options.tenant.join(',');
+      }
+      if (!getParam('min_rule_level')) state.severitySelection = savedOpts.severitySelection;
+      if (!getParam('limit')) state.limit = savedOpts.limit;
+      if (!getParam('review_status')) state.reviewStatus = savedOpts.reviewStatus;
+      if (!getParam('group_by')) state.groupBy = savedOpts.groupBy;
+    }
     render();
   } catch (error) {
     if (error.name === 'AbortError') return;

@@ -14,6 +14,7 @@ from app.parser import (
     parse_timestamp_iso,
     valid_ip,
 )
+from app.wazuh_intel import classify_alert, correlate_alerts
 
 
 def normalize_alert(raw: dict[str, Any]) -> dict[str, Any]:
@@ -93,7 +94,7 @@ def normalize_alert(raw: dict[str, Any]) -> dict[str, Any]:
 
     timestamp_iso = parse_timestamp_iso(raw_ts) or parsed.get("timestamp_iso") or ""
 
-    return {
+    normalized = {
         "alert_id": alert_id,
         "wazuh_id": wazuh_id,
         "timestamp": timestamp_iso,
@@ -121,15 +122,24 @@ def normalize_alert(raw: dict[str, Any]) -> dict[str, Any]:
         "is_reviewed": False,
         "reviewer_notes": "",
     }
+    # Persist the deterministic read/classify result alongside the normalized
+    # record. It is metadata only; raw logs still live in ``raw``/``full_log``.
+    parsed["wazuh_intel"] = classify_alert(normalized)
+    return normalized
 
 
 def suggest_groups(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Local deterministic grouping; no text or log is transmitted to any model."""
+    # Group by attack pattern (target host + rule), NOT by source IP: an
+    # attacker rotating source IPs must collapse into ONE group, with source
+    # IPs collected as a facet (source_ips), not as a grouping key. "Same
+    # source + rule" is demoted to a last-resort fallback for alerts that
+    # match nothing else.
     rules = [
-        ("Same source + rule", lambda a: (a.get("source_ip"), a.get("rule_id")) if a.get("source_ip") and a.get("rule_id") and a.get("rule_id") != "-" else None),
         ("Same agent + rule", lambda a: (a.get("agent_name"), a.get("rule_id")) if a.get("agent_name") and a.get("rule_id") and a.get("rule_id") != "-" else None),
         ("Same CVE identifier", lambda a: a.get("cve") if a.get("cve") else None),
         ("Identical Log Signature", lambda a: a.get("log_signature") if a.get("log_signature") else None),
+        ("Same source + rule", lambda a: (a.get("source_ip"), a.get("rule_id")) if a.get("source_ip") and a.get("rule_id") and a.get("rule_id") != "-" else None),
     ]
     out = []
     for category, keyfn in rules:
@@ -161,9 +171,10 @@ def suggest_groups(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     reason = f"Terdeteksi {len(unique_ids)} alert ({total_hits} hits) dari IP sumber {src_ip} yang memicu Rule {rule_id} ({description}) dengan Level {rule_level}."
                 elif category == "Same agent + rule":
                     agent_h = key[0] if isinstance(key, tuple) else ""
+                    ip_note = f" dari {len(source_ips)} IP sumber berbeda" if len(source_ips) > 1 else ""
                     title = f"Host {agent_h} · Rule {rule_id} ({description})"
                     basis = f"Korelasi Host Target: {agent_h} & Rule {rule_id}"
-                    reason = f"Terdeteksi {len(unique_ids)} alert ({total_hits} hits) pada host target '{agent_h}' yang memicu Rule {rule_id} ({description}) dengan Level {rule_level}."
+                    reason = f"Terdeteksi {len(unique_ids)} alert ({total_hits} hits){ip_note} pada host target '{agent_h}' yang memicu Rule {rule_id} ({description}) dengan Level {rule_level}."
                 elif category == "Same CVE identifier":
                     cve_val = key if isinstance(key, str) else str(key)
                     title = f"CVE {cve_val} ({description})"
@@ -262,8 +273,8 @@ def suggestions_with_fallback(
     base_url: str = "http://127.0.0.1:11434",
 ) -> tuple[list[dict[str, Any]], str, str | None]:
     if not enabled:
-        return suggest_groups(alerts), "local_rules", None
+        return correlate_alerts(alerts), "local_rules", None
     try:
         return local_ai_suggest_groups(alerts, model=model, base_url=base_url), "local_ai", None
     except Exception as exc:
-        return suggest_groups(alerts), "local_rules_fallback", str(exc)
+        return correlate_alerts(alerts), "local_rules_fallback", str(exc)

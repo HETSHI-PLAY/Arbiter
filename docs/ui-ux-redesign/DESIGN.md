@@ -1,7 +1,7 @@
 ---
 version: alpha
-name: Arbiter Investigation Desk — proposal
-description: "Proposed quiet, offline-first SOC investigation desk; not yet implemented."
+name: Arbiter Investigation Desk
+description: "Quiet, offline-first SOC investigation desk. Implemented as the Quiet Evidence Desk design system; tokens live in app/static/styles/tokens.css."
 colors:
   primary: "#F5F5F5"
   secondary: "#B8B8B8"
@@ -101,11 +101,11 @@ components:
 
 ## Overview
 
-**Status: proposal, belum disetujui dan belum diimplementasikan.** File ini bukan dokumentasi UI production saat ini. Jangan mempromosikannya ke root sebelum arah desain disetujui dan implementasi diverifikasi.
+**Status: disetujui dan diimplementasikan.** Arah "Quiet Evidence Desk" sudah hidup di `app/static/styles/tokens.css` (stempel "user-approved") dan komponen di `app/static/styles/*.css`. File ini adalah sumber token, dilint dengan `@google/design.md`.
 
 Arbiter adalah local SOC investigation desk untuk menormalkan Wazuh telemetry, melakukan triage, menyusun insiden, dan menghasilkan dokumen. Mode utama: **Operate**. Keberhasilan berarti analis menemukan bukti, mengambil keputusan, dan menghasilkan laporan dengan scope yang benar—bukan melihat dashboard dekoratif.
 
-Arah: **Quiet Evidence Desk**. Hierarki berasal dari antrean alert, bukti, dan narasi insiden. Signature interaction: memilih alert membuka inspector kontekstual tanpa kehilangan filter, selection, atau posisi antrean.
+Arah: **Quiet Evidence Desk**. Hierarki berasal dari antrean alert, bukti, klasifikasi, dan narasi insiden. Signature interaction: memilih alert membuka inspector kontekstual tanpa kehilangan filter, selection, atau posisi antrean; event respons tertaut ke alert asal, dan korelasi menjelaskan kronologi tanpa menggantikan keputusan analis.
 
 Referensi prinsip: IBM/Carbon untuk functional density, tipografi, dan semantic tokens; app-screen guidance untuk neutral chrome; Emil design engineering untuk feedback singkat. Ini desain Arbiter sendiri, bukan clone IBM atau Linear. Tidak ada hero marketing, metric rekaan, chart tanpa pertanyaan, neon chrome, atau icon tile dekoratif.
 
@@ -149,6 +149,21 @@ Referensi prinsip: IBM/Carbon untuk functional density, tipografi, dan semantic 
 - Inspector non-modal pada desktop cukup lebar; tabs Detail, Kejadian, Raw. Alert identity, target, rule dan waktu tetap terlihat; copy raw ditandai sensitif. Pada mobile menjadi full detail view dengan Back yang memulihkan konteks.
 - Batch bar ditempatkan dalam workspace dan muncul hanya saat ada selection; tidak menutupi last row atau keyboard focus.
 
+### Klasifikasi & korelasi
+
+- Klasifikasi adalah bukti pendukung, bukan pengganti keputusan analis. Setiap verdict membawa label, alasan, dan sinyal; warna tidak pernah menjadi satu-satunya penyampai makna.
+- Tiga verdict: **True Positive**, **False Positive**, **Perlu ditinjau**. Tiga role: **Indikator**, **Respons**, **Konteks**. Role menjelaskan fungsi event, bukan tingkat bahaya.
+- **Respons aktif bukan serangan mandiri.** Event rule 651/652 ditampilkan sebagai bukti respons yang tertaut ke alert asal. Bila alert asal berada di luar scope, tampilkan sebagai “Respons tanpa alert asal” dengan verdict **Perlu ditinjau**, bukan “False Positive” atau “serangan”.
+- Baris antrean tetap ringkas: severity, event/asset, source+intel, hits, review. Verdict ditampilkan sebagai badge kecil di inspector dan correlation card, bukan kolom baru yang memenuhi toolbar. Bila verdict ditambahkan ke tabel, gunakan satu kolom dengan label teks dan tooltip alasan.
+- Inspector memiliki blok **“Mengapa verdict ini?”** berisi daftar sinyal: profil rule, level Wazuh, grup rule, tautan alert asal, MITRE, source IP berisiko, pengulangan. Setiap sinyal menyebut jenisnya (rule/severity/correlation/intel/volume); sinyal konteks tidak boleh berbunyi seperti bukti pasti.
+- Untuk event respons, inspector menampilkan **Alert asal** (rule, deskripsi, source IP, agent) dan aksi respons (`add`/`delete`, program). Jangan menyembunyikan origin di balik tombol “raw”.
+- **Correlation panel** menampilkan: judul host+rule, jumlah alert primer vs respons, source IP sebagai facet, rentang waktu, confidence, dan urutan tahapan (Pengintaian → Akses kredensial → Aktivitas administratif → Persistensi → Dampak). Tahapan adalah penjelas kronologi, bukan tuduhan.
+- Source IP berputar tetap satu grup. Jangan memecah grup hanya karena IP berubah; tampilkan “3 IP sumber” sebagai facet yang dapat dibuka.
+- **Context strip** hanya berisi konteks yang tersedia: known-bad IP, first occurrence, business hours, source IP type. Beri label “Konteks”, bukan “Bukti”. Dataset sintetis menunjukkan field ini tidak mengubah label; UI tidak boleh mengklaim kausalitas.
+- Empty state: “Belum ada hasil korelasi” dengan ajakan memperluas scope atau memilih filter; jangan menampilkan kartu kosong. Error: “Korelasi gagal dimuat” + retry, tanpa menghapus antrean.
+- Wording: “Tidak ada deteksi pada cache”, “Belum ada cache”, “Perlu ditinjau”, “Respons aktif tertaut”. Dilarang: “Clean”, “Aman”, “Safe”, “False positive” tanpa alasan yang terlihat.
+- Acceptance: pada 1440×900, inspector dapat menampilkan origin + tiga sinyal pertama tanpa scroll halaman; correlation panel tidak menyebabkan horizontal page overflow; 200% zoom tetap mempertahankan tombol tutup, tautan origin, dan aksi “Tinjau sebagai insiden”; keyboard dapat mencapai badge, daftar sinyal, dan tautan origin.
+
 ### Insiden
 
 - Index berupa list yang dapat diurutkan, bukan kartu besar untuk setiap kasus.
@@ -178,7 +193,7 @@ Control radius 4px; standalone panel radius 8px. Hindari kotak bersarang berulan
 
 ## Components
 
-Reusable: AppShell, WorkspaceSwitcher, PageHeader, QueueToolbar, FilterSheet, AlertTable/AlertList, SeverityLabel, IntelSummary, AlertInspector, SelectionToolbar, IncidentEditor, EvidenceTimeline, ImportPanel, ExportMenu, InlineStatus, EmptyState, SkeletonRows, ErrorRegion.
+Reusable: AppShell, WorkspaceSwitcher, PageHeader, QueueToolbar, FilterSheet, AlertTable/AlertList, SeverityLabel, IntelSummary, VerdictBadge, RoleLabel, EvidenceSignals, OriginAlertLink, CorrelationChain, ContextStrip, AlertInspector, SelectionToolbar, IncidentEditor, EvidenceTimeline, ImportPanel, ExportMenu, InlineStatus, EmptyState, SkeletonRows, ErrorRegion.
 
 Semua control punya default, hover, focus-visible, active, disabled, pending, success dan error jika state relevan. Disabled harus punya alasan. Pending action mencegah double-submit; gagal tidak menghapus input. Async feedback diumumkan via live region, bukan hanya warna toast.
 

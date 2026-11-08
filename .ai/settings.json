@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json.schemastore.org/ai-settings.json",
+  "project": "Arbiter",
+  "permissions": {
+    "network": {
+      "allow": [
+        "127.0.0.1:8000",
+        "127.0.0.1:11434",
+        "localhost"
+      ],
+      "note": "Loopback only. The Wazuh Indexer and PostgreSQL are reached by the app process, not by the agent. Never widen this to arbitrary hosts."
+    },
+    "files": {
+      "deny": [
+        ".env",
+        ".env.local",
+        "secret.key",
+        "*.secret.key",
+        "**/secret.key"
+      ],
+      "note": "Never read .env, the live production database, real alert records, or raw logs. Development and QA use synthetic fixtures in tests/ only."
+    }
+  },
+  "model": {
+    "preferred": "auto",
+    "coding": "auto"
+  },
+  "stack": {
+    "backend": "Python 3.11+ / FastAPI",
+    "database": "PostgreSQL 16 (psycopg)",
+    "frontend": "Vanilla JavaScript ES modules + native CSS (no React/Vue/Tailwind)"
+  }
+}

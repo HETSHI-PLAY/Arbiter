@@ -37,6 +37,7 @@ export function queryFrom(params = new URLSearchParams()) {
     filter_preset: choices(get('filter_preset'), ['', '403', '404', 'repeating', 'non_http', 'bot', 'curl'], ''),
     status: choices(get('status'), ['all', 'grouped', 'ungrouped'], 'all'),
     group_id: get('group_id') || '',
+    alert_ids: get('alert_ids') || '',
     facet: get('facet') || '',
     facet_value: get('facet_value') || '',
     secondary_facet: get('secondary_facet') || '',

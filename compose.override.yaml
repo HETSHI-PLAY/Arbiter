@@ -1,0 +1,11 @@
+# Development overrides — automatically merged by `docker compose up`.
+# Bind-mount the app source for live reload, and disable the standalone DB port
+# collision when running against an already-running host PostgreSQL.
+services:
+  arbiter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./app:/app/app
+      - arbiter_secrets:/data

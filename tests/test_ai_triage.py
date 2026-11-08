@@ -7,6 +7,7 @@ endpoint is mocked or refused before any socket is opened.
 """
 from __future__ import annotations
 
+import json
 import os
 import unittest
 from typing import Any
@@ -74,9 +75,41 @@ class AITriageAPITests(unittest.TestCase):
         self.assertIsInstance(response.json()["groups"], list)
 
     def test_ai_triage_validates_bounds(self):
-        for payload in ({"limit": 1}, {"limit": 1000}, {"min_rule_level": 99}, {"min_rule_level": -1}):
+        for payload in ({"limit": 0}, {"limit": 10000}, {"min_rule_level": 99}, {"min_rule_level": -1}, {"min_rule_level": 12, "max_rule_level": 7}):
             response = self.client.post("/api/ai/triage", json=payload)
             self.assertEqual(response.status_code, 400, response.text)
+
+    def test_ai_triage_supports_severity_ranges_7_11_12_14_15_plus_and_custom_limit(self):
+        self.db.add_alert(9, "Alpha", rule_level=4, description="Low range alert")
+        self.db.add_alert(10, "Alpha", rule_level=9, description="Medium range alert")
+        self.db.add_alert(11, "Alpha", rule_level=13, description="High range alert")
+        self.db.add_alert(12, "Alpha", rule_level=15, description="Critical range alert")
+        low = self.client.post("/api/ai/triage", json={
+            "tenant": ["Alpha"], "limit": 250, "min_rule_level": 0, "max_rule_level": 6, "review_status": "all",
+        }).json()
+        low_ids = {str(a["id"]) for a in low["alerts"]}
+        self.assertEqual(low_ids, {"9"})
+
+        med = self.client.post("/api/ai/triage", json={
+            "tenant": ["Alpha"], "limit": 250, "min_rule_level": 7, "max_rule_level": 11, "review_status": "all",
+        }).json()
+        med_ids = {str(a["id"]) for a in med["alerts"]}
+        self.assertIn("10", med_ids)
+        self.assertNotIn("9", med_ids)
+        self.assertNotIn("11", med_ids)
+        self.assertNotIn("12", med_ids)
+
+        high = self.client.post("/api/ai/triage", json={
+            "tenant": ["Alpha"], "limit": 250, "min_rule_level": 12, "max_rule_level": 14, "review_status": "all",
+        }).json()
+        high_ids = {str(a["id"]) for a in high["alerts"]}
+        self.assertEqual(high_ids, {"11"})
+
+        crit = self.client.post("/api/ai/triage", json={
+            "tenant": ["Alpha"], "limit": 250, "min_rule_level": 15, "review_status": "all",
+        }).json()
+        crit_ids = {str(a["id"]) for a in crit["alerts"]}
+        self.assertEqual(crit_ids, {"12"})
 
     def test_ai_triage_falls_back_to_heuristic_when_model_unavailable(self):
         self.client.put("/api/settings", json={
@@ -312,6 +345,277 @@ class AITriageAPITests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 400)
         self.assertIn("outside the active tenant", response.json()["detail"])
+
+    # ── IP-agnostic grouping: rotating source IPs collapse into one group ──
+
+    def test_suggest_groups_collapses_rotating_source_ips_into_one_group(self):
+        from app.core import suggest_groups
+        # Same rule + same target host, three different source IPs. This is the
+        # "attacker scans then changes IP" case: it must be ONE group, not three.
+        alerts = [
+            {"id": "a1", "rule_id": "31510", "rule_level": 10, "description": "Web scan", "source_ip": "1.2.3.4", "agent_name": "web-01", "hit_count": 1, "log_signature": "s1"},
+            {"id": "a2", "rule_id": "31510", "rule_level": 10, "description": "Web scan", "source_ip": "5.6.7.8", "agent_name": "web-01", "hit_count": 1, "log_signature": "s2"},
+            {"id": "a3", "rule_id": "31510", "rule_level": 10, "description": "Web scan", "source_ip": "9.9.9.9", "agent_name": "web-01", "hit_count": 1, "log_signature": "s3"},
+        ]
+        groups = suggest_groups(alerts)
+        # The agent+rule group (now first priority) holds all three.
+        host_groups = [g for g in groups if g["category"] == "Same agent + rule"]
+        self.assertEqual(len(host_groups), 1)
+        self.assertEqual(set(host_groups[0]["alert_ids"]), {"a1", "a2", "a3"})
+        self.assertEqual(host_groups[0]["source_ips"], ["1.2.3.4", "5.6.7.8", "9.9.9.9"])
+        self.assertEqual(host_groups[0]["alert_count"], 3)
+
+    def test_suggest_groups_keeps_distinct_hosts_separate(self):
+        from app.core import suggest_groups
+        alerts = [
+            {"id": "a1", "rule_id": "31510", "rule_level": 10, "description": "Web scan", "source_ip": "1.2.3.4", "agent_name": "web-01", "hit_count": 1, "log_signature": "s1"},
+            {"id": "a2", "rule_id": "31510", "rule_level": 10, "description": "Web scan", "source_ip": "5.6.7.8", "agent_name": "web-01", "hit_count": 1, "log_signature": "s2"},
+            {"id": "b1", "rule_id": "31510", "rule_level": 10, "description": "Web scan", "source_ip": "9.9.9.9", "agent_name": "web-02", "hit_count": 1, "log_signature": "s3"},
+            {"id": "b2", "rule_id": "31510", "rule_level": 10, "description": "Web scan", "source_ip": "8.8.8.8", "agent_name": "web-02", "hit_count": 1, "log_signature": "s4"},
+        ]
+        groups = suggest_groups(alerts)
+        host_groups = [g for g in groups if g["category"] == "Same agent + rule"]
+        self.assertEqual(len(host_groups), 2, "different target hosts stay separate")
+        self.assertEqual({g["alert_ids"][0] for g in host_groups}, {"a1", "b1"})
+
+    def test_bulk_full_logs_returns_in_scope_logs_only(self):
+        self.db.add_alert(4, "Alpha", rule_level=10, description="brute force", source_ip="1.2.3.4")
+        self.db.add_alert(5, "Alpha", rule_level=10, description="brute force", source_ip="5.6.7.8")
+        response = self.client.post("/api/alerts/full-logs", json={"tenant": ["Alpha"], "alert_ids": [4, 5]})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["count"], 2)
+        self.assertEqual({item["id"] for item in body["items"]}, {4, 5})
+        for item in body["items"]:
+            self.assertTrue(item["full_log"], "full_log must be populated from raw JSONB")
+
+    def test_bulk_full_logs_rejects_out_of_scope_and_invalid(self):
+        self.db.add_alert(4, "Alpha", rule_level=10, description="brute force", source_ip="1.2.3.4")
+        response = self.client.post("/api/alerts/full-logs", params={"tenant": "Gamma"}, json={"alert_ids": [4]})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("outside the active tenant", response.json()["detail"])
+        response = self.client.post("/api/alerts/full-logs", params={"tenant": "Alpha"}, json={"alert_ids": []})
+        self.assertEqual(response.status_code, 400)
+        response = self.client.post("/api/alerts/full-logs", params={"tenant": "Alpha"}, json={"alert_ids": ["bogus"]})
+        self.assertEqual(response.status_code, 422)
+
+    def test_group_by_rule_description_merges_multiple_agents_in_same_tenant_and_never_mixes_tenants(self):
+        # Alpha has 2 different agents with the same rule description -> 1 group for Alpha.
+        # Beta has the exact same rule description and agent -> must be a SEPARATE group for Beta.
+        self.db.add_alert(20, "Alpha", rule_level=10, description="Multiple SSH authentication failures", source_ip="1.1.1.1", agent_name="alpha-web-01")
+        self.db.add_alert(21, "Alpha", rule_level=10, description="Multiple SSH authentication failures", source_ip="2.2.2.2", agent_name="alpha-db-02")
+        self.db.add_alert(22, "Beta", rule_level=10, description="Multiple SSH authentication failures", source_ip="1.1.1.1", agent_name="alpha-web-01")
+
+        response = self.client.post("/api/ai/triage", json={
+            "tenant": ["all"],
+            "limit": 100,
+            "min_rule_level": 7,
+            "review_status": "all",
+            "group_by": "rule_description",
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["group_by"], "rule_description")
+        alerts_by_id = {str(a["id"]): a for a in body["alerts"]}
+
+        # Verify every single returned group belongs to strictly 1 tenant.
+        for group in body["groups"]:
+            tenants_in_group = {alerts_by_id[aid]["tenant"] for aid in group["alert_ids"]}
+            self.assertEqual(len(tenants_in_group), 1, f"Group mixed multiple tenants: {group}")
+
+        # Verify Alpha alerts 20 and 21 (different agents, same rule description) are in the same group.
+        alpha_ssh_groups = [
+            g for g in body["groups"]
+            if {"20", "21"}.issubset(set(g["alert_ids"]))
+        ]
+        self.assertEqual(len(alpha_ssh_groups), 1)
+        self.assertNotIn("22", alpha_ssh_groups[0]["alert_ids"])
+
+    def test_ai_triage_save_rejects_multi_tenant_group(self):
+        self.db.add_alert(30, "Alpha", rule_level=10, description="Shared rule", source_ip="1.2.3.4")
+        self.db.add_alert(31, "Beta", rule_level=10, description="Shared rule", source_ip="1.2.3.4")
+        response = self.client.post("/api/ai/triage/save", json={
+            "tenant": ["all"],
+            "groups": [
+                {"title": "Illegal cross-tenant group", "category": "Rule description", "verdict": "tp", "reason": "test", "alert_ids": [30, 31]},
+            ],
+        })
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertIn("2 tenant", response.json()["detail"])
+
+    def test_ai_triage_persists_state_and_merges_new_alerts_with_1700_wib_cutoff(self):
+        # 1. Before running AI Triage, GET /api/ai/triage indicates no saved state.
+        initial = self.client.get("/api/ai/triage").json()
+        self.assertFalse(initial["saved"])
+
+        # 2. Add two alerts in tenant Alpha before 17:00 WIB on 2026-11-08 (10:00 WIB and 14:00 WIB).
+        self.db.add_alert(
+            40, "Alpha",
+            timestamp="2026-11-08T10:00:00+07:00",
+            rule_level=10,
+            description="Wazuh rule: Brute force login",
+            agent_name="alpha-agent-1",
+        )
+        self.db.add_alert(
+            41, "Alpha",
+            timestamp="2026-11-08T14:00:00+07:00",
+            rule_level=10,
+            description="Wazuh rule: Brute force login",
+            agent_name="alpha-agent-2",
+        )
+
+        run_resp = self.client.post("/api/ai/triage", json={
+            "tenant": ["Alpha"],
+            "limit": 100,
+            "min_rule_level": 7,
+            "max_rule_level": 11,
+            "review_status": "unreviewed",
+            "group_by": "rule_description",
+        })
+        self.assertEqual(run_resp.status_code, 200, run_resp.text)
+
+        # Save to incidents so an open AI incident case group exists for this 17:00 WIB window.
+        groups_initial = run_resp.json()["groups"]
+        brute_group = next(g for g in groups_initial if {"40", "41"}.issubset(set(g["alert_ids"])))
+        self.assertEqual(brute_group["window_key"], "2026-11-08T17:00+07:00")
+        save_resp = self.client.post("/api/ai/triage/save", json={
+            "tenant": ["Alpha"],
+            "groups": [brute_group],
+        })
+        self.assertEqual(save_resp.status_code, 200, save_resp.text)
+        saved_case_id = save_resp.json()["saved"][0]["id"]
+        self.assertFalse(save_resp.json()["saved"][0]["merged"])
+
+        # 3. A new alert arrives at 16:30 WIB (still BEFORE 17:00 WIB on 2026-11-08),
+        #    and another alert arrives at 17:05 WIB (AFTER 17:00 WIB cutoff on 2026-11-08).
+        self.db.add_alert(
+            42, "Alpha",
+            timestamp="2026-11-08T16:30:00+07:00",
+            rule_level=10,
+            description="Wazuh rule: Brute force login",
+            agent_name="alpha-agent-3",
+        )
+        self.db.add_alert(
+            43, "Alpha",
+            timestamp="2026-11-08T17:05:00+07:00",
+            rule_level=10,
+            description="Wazuh rule: Brute force login",
+            agent_name="alpha-agent-1",
+        )
+
+        # 4. Reopening the AI Triage page (GET /api/ai/triage) returns the saved triage AND
+        #    automatically merges alert 42 (<= 17:00 WIB) into the existing group, while
+        #    placing alert 43 (> 17:00 WIB) into a separate new group!
+        reopen = self.client.get("/api/ai/triage")
+        self.assertEqual(reopen.status_code, 200, reopen.text)
+        reopen_body = reopen.json()
+        self.assertTrue(reopen_body["saved"])
+        reopen_groups = reopen_body["result"]["groups"]
+
+        pre_17_group = next(g for g in reopen_groups if "40" in g["alert_ids"])
+        self.assertEqual(set(pre_17_group["alert_ids"]), {"40", "41", "42"})
+        self.assertIn("42", pre_17_group.get("new_alert_ids", []))
+        self.assertNotIn("43", pre_17_group["alert_ids"])
+        self.assertEqual(pre_17_group["window_key"], "2026-11-08T17:00+07:00")
+        self.assertEqual(pre_17_group.get("saved_group_id"), saved_case_id)
+
+        post_17_group = next(g for g in reopen_groups if "43" in g["alert_ids"])
+        self.assertEqual(set(post_17_group["alert_ids"]), {"43"})
+        self.assertEqual(post_17_group["window_key"], "2026-11-09T17:00+07:00")
+
+        # 5. Verify that alert 42 was also automatically linked into the existing open AI incident group,
+        #    and saving both groups merges pre_17_group into saved_case_id while creating a new case for post_17_group.
+        save_again = self.client.post("/api/ai/triage/save", json={
+            "tenant": ["Alpha"],
+            "groups": [pre_17_group, post_17_group],
+        })
+        self.assertEqual(save_again.status_code, 200, save_again.text)
+        saved_items = save_again.json()["saved"]
+        self.assertEqual(len(saved_items), 2)
+        self.assertEqual(saved_items[0]["id"], saved_case_id)
+        self.assertTrue(saved_items[0]["merged"])
+        self.assertEqual(saved_items[0]["alert_count"], 3)
+        self.assertNotEqual(saved_items[1]["id"], saved_case_id)
+        self.assertFalse(saved_items[1]["merged"])
+        self.assertEqual(saved_items[1]["alert_count"], 1)
+
+    def test_apache_cgi_path_traversal_and_leakix_log_always_classified_as_tp(self):
+        traversal_log = (
+            '198.51.100.77 - - [08/Nov/2026:10:15:00 +0700] '
+            '"GET /cgi-bin/.%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/hosts HTTP/1.1" '
+            '400 487 "-" "Lkx-Apache2449TraversalPlugin/0.0.1 (+https://leakix.net/, +https://twitter.com/HaboubiAnis)"'
+        )
+        self.db.add_alert(
+            60, "Alpha",
+            timestamp="2026-11-08T10:15:00+07:00",
+            rule_id="31101",
+            rule_level=7,
+            description="Web server 400 error code.",
+            rule_groups='["web", "accesslog"]',
+            raw=json.dumps({"full_log": traversal_log}),
+            parsed_details=json.dumps({
+                "log_type": "http",
+                "method": "GET",
+                "path": "/cgi-bin/.%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/hosts",
+                "status": "400",
+                "ua": "Lkx-Apache2449TraversalPlugin/0.0.1 (+https://leakix.net/, +https://twitter.com/HaboubiAnis)",
+            }),
+        )
+
+        # 1. Heuristic triage classifies as TP
+        resp = self.client.post("/api/ai/triage", json={
+            "tenant": ["Alpha"],
+            "limit": 100,
+            "min_rule_level": 0,
+            "review_status": "all",
+            "group_by": "rule_description",
+        })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        groups = resp.json()["groups"]
+        target_group = next(g for g in groups if "60" in g["alert_ids"])
+        self.assertEqual(target_group["verdict"], "tp")
+        self.assertIn("Path Traversal", target_group["reason"])
+
+        # 2. Even when local AI is enabled and the LLM falsely returns "fp" for the cluster,
+        #    lock_tp prevents the exploit/traversal group from being downgraded to FP!
+        self.client.put("/api/settings", json={"ai": {"enabled": True, "model": "qwen2.5:7b"}})
+        fake_llm_fp = json.dumps({"verdicts": [{"index": 0, "verdict": "fp", "reason": "Hanya error 400 biasa"}, {"index": 1, "verdict": "fp", "reason": "Hanya error 400 biasa"}]})
+        ai_fn = self.api.triage_with_fallback.__globals__["ai_triage"]
+        with patch.dict(ai_fn.__globals__, {"ollama_request": Mock(return_value=fake_llm_fp)}):
+            ai_resp = self.client.post("/api/ai/triage", json={
+                "tenant": ["Alpha"],
+                "limit": 100,
+                "min_rule_level": 0,
+                "review_status": "all",
+                "group_by": "rule_description",
+            })
+        self.assertEqual(ai_resp.status_code, 200, ai_resp.text)
+        self.assertEqual(ai_resp.json()["mode"], "local_ai")
+        ai_group = next(g for g in ai_resp.json()["groups"] if "60" in g["alert_ids"])
+        self.assertEqual(ai_group["verdict"], "tp")
+
+    def test_alerts_and_triage_summary_filter_by_alert_ids(self):
+        self.db.add_alert(70, "Alpha", rule_level=10, description="Related alert 1")
+        self.db.add_alert(71, "Alpha", rule_level=10, description="Related alert 2")
+        self.db.add_alert(72, "Alpha", rule_level=10, description="Unrelated alert 3")
+
+        alerts_resp = self.client.get("/api/alerts", params={
+            "tenant": "Alpha",
+            "review_status": "all",
+            "alert_ids": "70,71",
+        })
+        self.assertEqual(alerts_resp.status_code, 200, alerts_resp.text)
+        body = alerts_resp.json()
+        self.assertEqual(body["total"], 2)
+        self.assertEqual({item["id"] for item in body["items"]}, {70, 71})
+
+        summary_resp = self.client.get("/api/triage/summary", params={
+            "tenant": "Alpha",
+            "review_status": "all",
+            "alert_ids": "70,71",
+        })
+        self.assertEqual(summary_resp.status_code, 200, summary_resp.text)
+        self.assertEqual(summary_resp.json()["alerts"], 2)
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ services:
       ARBITER_SECRET_KEY: ${ARBITER_SECRET_KEY:-}
       ARBITER_SECRET_KEY_FILE: /data/secret.key
     volumes:
-      - ./app:/app/app
       - arbiter_secrets:/data
 
   # Standalone PostgreSQL container (for users without local Postgres)
@@ -32,7 +31,7 @@ services:
       - "5432:5432"
     volumes:
       - arbiter_pgdata:/var/lib/postgresql/data
-      - ./init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U arbiter -d arbiter"]
       interval: 5s

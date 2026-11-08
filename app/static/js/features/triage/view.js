@@ -6,6 +6,35 @@ import {createTriageSession} from '../../state/triage.js';
 import {intelSummary, intelBadge, renderQueue, renderTriageSummary, summaryRequestParams} from './model.js';
 
 const presets = [['','Semua jenis'],['403','403 Forbidden'],['404','404 Probes'],['repeating','Berulang'],['non_http','Non-HTTP'],['bot','Bot traffic'],['curl','Curl requests']];
+const verdictLabels = {tp:'True Positive',fp:'False Positive',needs_review:'Perlu ditinjau'};
+const roleLabels = {indicator:'Indikator',response:'Respons',context:'Konteks',unknown:'Belum diketahui'};
+const priorityLabels = {low:'Rendah',medium:'Sedang',high:'Tinggi',critical:'Kritis'};
+const verdictClass = verdict => verdict==='tp'?'critical':verdict==='fp'?'info':'warning';
+
+function classificationBlock(alert) {
+  const intel = alert?.parsed_details?.wazuh_intel;
+  if (!intel || !intel.verdict) return '';
+  const verdict = verdictLabels[intel.verdict] || intel.verdict;
+  const role = roleLabels[intel.role] || intel.role || '—';
+  const priority = priorityLabels[intel.priority] || intel.priority || '—';
+  const confidence = Number(intel.confidence);
+  const signals = Array.isArray(intel.signals) ? intel.signals.slice(0, 8) : [];
+  const origin = intel.origin && typeof intel.origin === 'object' ? intel.origin : null;
+  return `<section class="stack" aria-label="Klasifikasi alert">
+    <div class="split"><h3>Klasifikasi</h3><span class="badge ${verdictClass(intel.verdict)}">${esc(verdict)}</span></div>
+    <p class="meta">${esc(role)} · keyakinan ${Number.isFinite(confidence) ? Math.round(confidence * 100) + '%' : '—'} · prioritas ${esc(priority)}</p>
+    <p>${esc(intel.reason || 'Belum ada alasan klasifikasi.')}</p>
+    ${signals.length ? `<ul class="stack meta" aria-label="Sinyal klasifikasi">${signals.map(signal => `<li><strong>${esc(signal.label || signal.code || 'Sinyal')}</strong>: ${esc(signal.value || '—')}</li>`).join('')}</ul>` : ''}
+    ${origin ? `<div class="notice" data-kind="info"><p><strong>Alert asal:</strong> Rule ${esc(origin.rule_id || '—')} · ${esc(origin.description || 'tanpa deskripsi')}${origin.source_ip ? ` · <span class="mono">${esc(origin.source_ip)}</span>` : ''}${intel.origin_verdict ? ` · verdict asal: ${esc(verdictLabels[intel.origin_verdict] || intel.origin_verdict)}` : ''}</p></div>` : ''}
+  </section>`;
+}
+
+function chainLine(group) {
+  const steps = Array.isArray(group?.chain)
+    ? group.chain.filter(step => step.stage !== 'active_response').map(step => step.label).filter(Boolean)
+    : [];
+  return steps.length ? `<p class="meta">Tahapan: ${esc(steps.join(' → '))}</p>` : '';
+}
 export function mount(ctx) {
   const {root, route, signal, selection, navigate, notify} = ctx;
   const query = queryFrom(route.params);
@@ -18,7 +47,7 @@ export function mount(ctx) {
   let activeTab = 'detail', activeId = route.params.get('alert'), showIntel = true, wrapLog = true, showAllLogs = false, expandedLogIds = new Set();
   root.innerHTML = `<div class="page-header"><div class="page-heading"><h1>Triage</h1><p class="page-description">Periksa bukti. Tentukan langkah berikutnya.</p></div><div class="page-actions"><a class="button primary" href="${scopedRoute('/imports')}">${icon('upload')}Impor</a></div></div>
     <div class="tabs" aria-label="Antrean review">${[['unreviewed','Belum direview'],['all','Semua'],['reviewed','Direview']].map(([key,label])=>`<button class="tab" data-review="${key}" aria-pressed="${query.review_status===key}">${label}</button>`).join('')}</div>
-    <div class="toolbar"><div class="search-field"><label class="sr-only" for="triage-search">Cari alert</label>${icon('search')}<input type="search" id="triage-search" name="q" value="${esc(query.q)}" placeholder="Cari IP, asset, rule…" autocomplete="off" spellcheck="false"></div><button class="button" data-action="filters">${icon('filter')}Filter${query.filter_preset||query.status!=='all'||query.group_id||query.time_preset||query.time_from?' aktif':''}</button><button class="button" data-action="toggle-all-queue-logs" id="btn-toggle-queue-logs" aria-pressed="false" title="Tampilkan atau sembunyikan full log semua alert">${icon('cases')}Semua log</button><label class="sr-only" for="triage-sort">Urutan alert</label><select class="sort-control" id="triage-sort" name="sort"><option value="timestamp:desc">Terbaru</option><option value="timestamp:asc">Kronologis</option><option value="severity:desc">Severity tertinggi</option><option value="hits:desc">Hits terbanyak</option></select><button class="button icon-button" data-action="more" aria-label="Opsi antrean" aria-controls="queue-options" aria-expanded="false">${icon('more')}</button></div>
+    <div class="toolbar"><div class="search-field"><label class="sr-only" for="triage-search">Cari alert</label>${icon('search')}<input type="search" id="triage-search" name="q" value="${esc(query.q)}" placeholder="Cari IP, asset, rule…" autocomplete="off" spellcheck="false"></div><button class="button" data-action="filters">${icon('filter')}Filter${query.filter_preset||query.status!=='all'||query.group_id||query.alert_ids||query.time_preset||query.time_from?' aktif':''}</button><button class="button" data-action="toggle-all-queue-logs" id="btn-toggle-queue-logs" aria-pressed="false" title="Tampilkan atau sembunyikan full log semua alert">${icon('cases')}Semua log</button><label class="sr-only" for="triage-sort">Urutan alert</label><select class="sort-control" id="triage-sort" name="sort"><option value="timestamp:desc">Terbaru</option><option value="timestamp:asc">Kronologis</option><option value="severity:desc">Severity tertinggi</option><option value="hits:desc">Hits terbanyak</option></select><button class="button icon-button" data-action="more" aria-label="Opsi antrean" aria-controls="queue-options" aria-expanded="false">${icon('more')}</button></div>
     <div id="queue-options" class="toolbar" hidden><label class="checkbox-label"><input type="checkbox" id="show-intel" checked>Kolom source / intel</label><button class="button" data-action="correlation">Korelasi</button><button class="button" data-action="report-query">Laporan hasil filter</button></div>
     <div id="applied-filters" class="applied-filters"></div><div id="triage-summary-slot"></div><div id="correlation-slot"></div>
     <div class="triage-workspace" id="triage-workspace"><section class="queue-region" aria-label="Antrean kerja"><div id="selection-actions"></div><div id="queue-results">${loadingRows()}</div><div class="pagination" id="queue-pagination"></div></section><aside id="alert-inspector" class="inspector" aria-label="Detail alert" hidden></aside></div>
@@ -165,7 +194,7 @@ ${rawLog}`;
     if(activeTab==='raw')return `<div class="split"><h3>Raw alert JSON</h3><button class="button" data-action="copy-raw">${icon('copy')}Salin raw</button></div><p class="warning-copy">Konten mentah dapat memuat informasi sensitif. Tinjau sebelum dibagikan.</p><pre class="raw-log">${esc(JSON.stringify(a.raw||{},null,2))}</pre>`;
     if(activeTab==='occurrences')return `<div class="split"><h3>Kejadian berulang</h3><span class="meta num">${Number(a.hit_count)||1} hits</span></div><dl class="detail-grid"><div class="key-value"><dt>Pertama</dt><dd>${esc(formatTime(a.first_seen||a.timestamp))}</dd></div><div class="key-value"><dt>Terakhir</dt><dd>${esc(formatTime(a.last_seen||a.timestamp))}</dd></div></dl><ol class="timeline">${(a.duplicate_instances?.length?a.duplicate_instances:[{timestamp:a.timestamp,id:a.alert_id}]).map(inst=>`<li><time>${esc(formatTime(inst.timestamp))}</time><span class="meta mono">${esc(inst.id||'—')}</span>${inst.full_log?`<details><summary>Log kejadian</summary><pre class="raw-log">${esc(inst.full_log)}</pre></details>`:''}</li>`).join('')}</ol>`;
     const log=a.full_log||a.raw?.full_log;
-    return `<dl class="detail-grid"><div class="key-value"><dt>Target asset</dt><dd>${esc(a.agent_name||'—')}</dd></div><div class="key-value"><dt>Tenant</dt><dd>${esc(a.tenant||'Default')}</dd></div><div class="key-value"><dt>Detection rule</dt><dd>${esc(a.rule_id||'—')} · Level ${Number(a.rule_level)||0}</dd></div><div class="key-value"><dt>Waktu</dt><dd>${esc(formatTime(a.timestamp))}</dd></div><div class="key-value wide"><dt>Source / intel</dt><dd class="mono">${esc(a.source_ip||'—')}</dd><dd class="meta" style="margin-top:2px;">${intelBadge(a)}</dd>${a.source_ip?`<dd style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px;"><button class="button" data-action="enrich-single-ip" data-ip="${esc(a.source_ip)}">${icon('refresh')}Live Enrich</button><a class="button" href="http://localhost:3001/ip/${encodeURIComponent(a.source_ip)}" rel="noopener noreferrer" target="_blank">Buka IP Intel ${icon('external')}</a></dd>`:''}</div>${a.cve?`<div class="key-value"><dt>CVE</dt><dd>${esc(a.cve)}</dd></div>`:''}${a.mitre_ids?.length?`<div class="key-value wide"><dt>MITRE</dt><dd>${esc(a.mitre_ids.join(', '))}</dd></div>`:''}</dl>${log?`<section class="stack"><div class="split"><h3>Log utama</h3><button class="button" data-action="copy-redacted">Versi tersamarkan</button></div><pre class="raw-log">${esc(log)}</pre><p class="meta">Redaksi otomatis bukan jaminan aman untuk cloud. Tinjau hasil sebelum membagikan.</p></section>`:''}${a.previous_output?`<details><summary>Previous output</summary><pre class="raw-log">${esc(a.previous_output)}</pre></details>`:''}<section class="stack"><h3>Insiden terkait</h3>${a.groups?.length?a.groups.map(g=>`<div class="split"><a href="${scopedRoute('/incidents/'+encodeURIComponent(g.id))}">${esc(g.title)}</a><button class="button icon-button" data-remove-group="${esc(g.id)}" aria-label="Keluarkan dari insiden ${esc(g.title)}">${icon('close')}</button></div>`).join(''):'<p class="meta">Belum terhubung ke insiden.</p>'}<div class="field"><label for="inspector-group">Tambahkan ke insiden</label><select id="inspector-group" name="group_id"><option value="">Memuat insiden…</option></select></div><button class="button" data-action="add-group">Tambahkan bukti ke insiden</button></section><section class="stack"><h3>Review</h3><div class="split"><span class="meta">${a.is_reviewed?'Sudah ditinjau':'Belum ditinjau'}</span><button class="button" data-action="review-current">${a.is_reviewed?'Kembalikan ke antrean':'Tandai selesai ditinjau'}</button></div></section>`;
+    return `<dl class="detail-grid"><div class="key-value"><dt>Target asset</dt><dd>${esc(a.agent_name||'—')}</dd></div><div class="key-value"><dt>Tenant</dt><dd>${esc(a.tenant||'Default')}</dd></div><div class="key-value"><dt>Detection rule</dt><dd>${esc(a.rule_id||'—')} · Level ${Number(a.rule_level)||0}</dd></div><div class="key-value"><dt>Waktu</dt><dd>${esc(formatTime(a.timestamp))}</dd></div><div class="key-value wide"><dt>Source / intel</dt><dd class="mono">${esc(a.source_ip||'—')}</dd><dd class="meta" style="margin-top:2px;">${intelBadge(a)}</dd>${a.source_ip?`<dd style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px;"><button class="button" data-action="enrich-single-ip" data-ip="${esc(a.source_ip)}">${icon('refresh')}Live Enrich</button><a class="button" href="http://localhost:3001/ip/${encodeURIComponent(a.source_ip)}" rel="noopener noreferrer" target="_blank">Buka IP Intel ${icon('external')}</a></dd>`:''}</div>${a.cve?`<div class="key-value"><dt>CVE</dt><dd>${esc(a.cve)}</dd></div>`:''}${a.mitre_ids?.length?`<div class="key-value wide"><dt>MITRE</dt><dd>${esc(a.mitre_ids.join(', '))}</dd></div>`:''}</dl>${classificationBlock(a)}${log?`<section class="stack"><div class="split"><h3>Log utama</h3><button class="button" data-action="copy-redacted">Versi tersamarkan</button></div><pre class="raw-log">${esc(log)}</pre><p class="meta">Redaksi otomatis bukan jaminan aman untuk cloud. Tinjau hasil sebelum membagikan.</p></section>`:''}${a.previous_output?`<details><summary>Previous output</summary><pre class="raw-log">${esc(a.previous_output)}</pre></details>`:''}<section class="stack"><h3>Insiden terkait</h3>${a.groups?.length?a.groups.map(g=>`<div class="split"><a href="${scopedRoute('/incidents/'+encodeURIComponent(g.id))}">${esc(g.title)}</a><button class="button icon-button" data-remove-group="${esc(g.id)}" aria-label="Keluarkan dari insiden ${esc(g.title)}">${icon('close')}</button></div>`).join(''):'<p class="meta">Belum terhubung ke insiden.</p>'}<div class="field"><label for="inspector-group">Tambahkan ke insiden</label><select id="inspector-group" name="group_id"><option value="">Memuat insiden…</option></select></div><button class="button" data-action="add-group">Tambahkan bukti ke insiden</button></section><section class="stack"><h3>Review</h3><div class="split"><span class="meta">${a.is_reviewed?'Sudah ditinjau':'Belum ditinjau'}</span><button class="button" data-action="review-current">${a.is_reviewed?'Kembalikan ke antrean':'Tandai selesai ditinjau'}</button></div></section>`;
   }
   async function renderInspector() {
     const a=currentAlert;if(!a)return;
@@ -200,6 +229,8 @@ ${rawLog}`;
         const agent=g.agent_name?`<span class="meta">Host / Agent: <strong>${esc(g.agent_name)}</strong></span>`:'';
         const ruleInfo=g.rule_id&&g.rule_id!=='-'?`<span class="meta">Rule: <strong>${esc(g.rule_id)}</strong></span>`:'';
         const basis=g.basis||g.category?`<span class="correlation-basis-badge">${esc(g.basis||g.category)}</span>`:'';
+        const verdict=g.verdict&&verdictLabels[g.verdict]?`<span class="badge ${verdictClass(g.verdict)}">${esc(verdictLabels[g.verdict])}</span>`:'';
+        const response=g.response_alert_count?`<span class="meta">${Number(g.response_alert_count)} respons tertaut</span>`:'';
         return `<article class="correlation-card" data-suggestion-card="${i}">
           <div class="correlation-head">
             <div class="correlation-title-row">
@@ -210,12 +241,15 @@ ${rawLog}`;
             <button class="button primary" data-suggestion="${i}">Tinjau sebagai insiden (${count} bukti)</button>
           </div>
           <div class="correlation-meta meta">
+            ${verdict}
             ${basis}
             ${agent}
             ${ips}
             ${ruleInfo}
+            ${response}
           </div>
           <p class="correlation-reason">${esc(g.reason||g.analysis||'Tinjau bukti sebelum membuat insiden.')}</p>
+          ${chainLine(g)}
         </article>`;
       }).join(''):'<p class="meta">Tidak ada saran korelasi pada scope ini.</p>';
 
@@ -241,6 +275,7 @@ ${rawLog}`;
       return;
     }
     if(button.dataset.action==='clear-facet'){updateQuery({facet:null,facet_value:null,offset:0});return;}
+    if(button.dataset.action==='clear-alert-ids'){updateQuery({alert_ids:null,offset:0});return;}
     if(button.dataset.review){updateQuery({review_status:button.dataset.review});return;}
     if(button.dataset.sort){updateQuery({sort_by:button.dataset.sort,sort:query.sort_by===button.dataset.sort&&query.sort==='desc'?'asc':'desc'});return;}
     if(button.dataset.inspect){activeTab=button.dataset.inspectTab||'detail';await openInspector(button.dataset.inspect);return;}
@@ -380,7 +415,7 @@ ${rawLog}`;
   });
   on(root,'keydown',e=>{if(e.key==='Escape'&&activeId&&!dialog.open){e.preventDefault();closeInspector();}});
   on(root,'arbiter:refresh',()=>load());
-  const filters=[];if(query.q)filters.push(`Pencarian: ${esc(query.q)}`);if(query.filter_preset)filters.push(esc(presets.find(([v])=>v===query.filter_preset)?.[1]));if(query.group_id)filters.push('Bukti insiden terpilih');if(query.status!=='all')filters.push(query.status==='grouped'?'Sudah masuk insiden':'Belum masuk insiden');
+  const filters=[];if(query.q)filters.push(`Pencarian: ${esc(query.q)}`);if(query.filter_preset)filters.push(esc(presets.find(([v])=>v===query.filter_preset)?.[1]));if(query.group_id)filters.push('Bukti insiden terpilih');if(query.alert_ids){const aidCount=query.alert_ids.split(',').filter(Boolean).length;filters.push(`Alert terkait (${aidCount}) <button class="button text-button" data-action="clear-alert-ids" style="cursor:pointer; padding:0 4px;" aria-label="Tampilkan semua alert">✕</button>`);}if(query.status!=='all')filters.push(query.status==='grouped'?'Sudah masuk insiden':'Belum masuk insiden');
   if(query.facet&&query.facet_value)filters.push(`Filter: ${esc(query.facet)} = ${esc(query.facet_value)} <button class="button text-button" data-action="clear-facet" style="cursor:pointer; padding:0 4px;">✕</button>`);
   if(query.time_preset){const labels={'1h':'1 jam terakhir','24h':'24 jam terakhir','7d':'7 hari terakhir','30d':'30 hari terakhir'};filters.push(labels[query.time_preset]||`Waktu: ${esc(query.time_preset)}`);}
   else if(query.time_from||query.time_to)filters.push(`Waktu: ${query.time_from?esc(formatTime(query.time_from)):'—'} s/d ${query.time_to?esc(formatTime(query.time_to)):'kini'}`);

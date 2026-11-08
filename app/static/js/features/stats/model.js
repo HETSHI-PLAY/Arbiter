@@ -171,7 +171,8 @@ export const MALICIOUS_PATTERNS = [
   /credentials?/i,
   /secret/i,
   /\.(aws|firebase)(\b|\/|$)/i,
-  /etc\/(passwd|shadow)/i,
+  /(?:\.|%2e|%252e){2}(?:\/|\\|%2f|%5c)/i,
+  /etc\/(passwd|shadow|hosts|issue|group)/i,
   /proc\/self/i,
   /(win|boot)\.ini/i,
 
@@ -275,6 +276,7 @@ export const BENIGN_WHITELIST_PATTERNS = [
 ];
 
 export const INJECTION_PATTERNS = [
+  /(?:\.|%2e|%252e){2}(?:\/|\\|%2f|%5c)/i,
   /%22|%27|%3C|%3E|%7C|[\"'<>|]/,
   /rest_route=/i,
   /author=\d+/i,
@@ -325,7 +327,7 @@ export function isMaliciousAlert(alert) {
   }
 
   // 2. Check scanner / anomalous User-Agent
-  if (ua && /zgrab|Go Web Pentest Tool|masscan|nuclei|nikto|sqlmap|nmap|Firefox\/3\.|Linux i686/i.test(ua)) {
+  if (ua && /zgrab|Go Web Pentest Tool|masscan|nuclei|nikto|sqlmap|nmap|lkx-|traversalplugin|apache2449|leakix|Firefox\/3\.|Linux i686/i.test(ua)) {
     return true;
   }
 
