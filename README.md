@@ -58,35 +58,57 @@ Arbiter uses a **Quiet Evidence Desk** design with focused destinations instead 
 
 | Destination | Route | Purpose |
 |-------------|-------|---------|
-| **Triage** | `#/triage` | Alert queue with sidebar inspector. Default home. |
+| **Triage** | `#/triage` | Alert queue with sidebar inspector, scoped `alert_ids` filtering, and inline log viewer. Default home. |
+| **AI Triage** | `#/ai-triage` | Local AI (Ollama) & deterministic heuristic TP/FP triage, tenant/severity/grouping controls, persistent state, and daily 17:00 WIB case windowing |
+| **Realtime** | `#/realtime` | Live Wazuh Indexer alert counter and on-demand / scheduled pull into active database |
+| **Statistik** | `#/stats` | Multi-dimensional pivot charts, Benign/Malicious Spotter, and secondary drill-down |
 | **Insiden** | `#/incidents/:id` | Case editor: evidence grouping, analysis, conclusions, recommendations |
 | **Impor** | `#/imports` | Paste or upload new Wazuh JSON exports |
 | **Laporan** | `#/reports` | Scoped export (CSV, JSON, clipboard HTML, .docx, .xlsx) |
-| **Pengaturan** | `#/settings` | Wazuh Indexer connection, realtime monitor, sidebar preference |
+| **Database** | `#/database` | Local / Remote PostgreSQL profile switching and safe preview-gated purge maintenance |
+| **Pengaturan** | `#/settings` | Wazuh Indexer connection, local AI (Ollama) model config, realtime monitor, sidebar preference |
 
-### 6. Review & Triage Workflow
+### 6. Local AI Triage & Persistent Daily Case Grouping (`#/ai-triage`)
+- **Dual-Engine Classification**: Uses a local loopback Ollama model (`http://127.0.0.1:11434`) when enabled, or automatically falls back to deterministic local rules (`local_rules` / `local_rules_fallback`) with explicit mode badges.
+- **Granular Severity & Scope Controls**:
+  - **Tenant Filter**: Scope AI Triage to a specific tenant or across all tenants (`Semua tenant`).
+  - **Exact Severity Bands**: `Low (rule.level 0–6)`, `Medium (rule.level 7–11)`, `High (rule.level 12–14)`, and `Critical (rule.level 15+)`.
+  - **Custom Alert Limit**: User-defined maximum alerts (`1`–`5000`).
+- **Flexible Grouping with Strict Tenant Isolation**:
+  - **Deskripsi Rule (`rule_description`)**: Groups alerts sharing the same rule description within a single tenant (even across multiple agents/hosts in that tenant).
+  - **Host / Agent + Rule (`host_rule`)**: Groups alerts by target agent + rule ID within a single tenant.
+  - **Single-Tenant Guardrail**: A single triage or incident case group is strictly forbidden from combining 2 or more tenants.
+- **Persistent Results & 17:00 WIB (`UTC+7`) Daily Window Cutoff**:
+  - Triage results are automatically saved in `wazuh.app_settings` (`GET /api/ai/triage`) and restored when reopening `#/ai-triage`.
+  - Newly ingested alerts matching an existing group are automatically merged into that group (and its linked open AI incident case) if they occur before the daily **17:00 WIB** cutoff; alerts after **17:00 WIB** roll over into a new daily window group.
+- **Exploit Payload & Scanner True-Positive Lock (`lock_tp`)**:
+  - Deep inspection of URL-decoded paths, queries, User-Agents, and raw logs detects Path Traversal / LFI (`.%2e`, `%2e%2e`, `../`, `/cgi-bin/`, `/etc/hosts`, `/etc/passwd`), exploit scanners (`Lkx-Apache2449TraversalPlugin`, `leakix.net`, `nuclei`, `sqlmap`, `nikto`, `nmap`, `zgrab`), and RCE/SQLi/JNDI payloads.
+  - Alerts carrying verified exploit indicators are locked as **True Positive (`tp`)** even when the HTTP status is `400`/`403`/`404` or when a local LLM attempts to downgrade the cluster.
+- **Focused Triage Drill-Down**: Clicking **Buka di Triage** on any AI Triage group opens `#/triage` filtered exclusively to that group's member `alert_ids` while opening the first alert in the detail inspector.
+
+### 7. Review & Triage Workflow
 - Flag alerts as Pending or Reviewed, individually or in batch.
 - **Shift + Click** range selection for fast bulk operations.
 - Selection survives page re-renders and filter changes (Set-based state, not DOM checkboxes).
 - Tenant-scoped selection prevents cross-tenant contamination.
-- Quick filter presets: 403 Forbidden, 404 Probes, Repeating, Bot traffic, Curl requests, Non-HTTP.
+- Quick filter presets: 403 Forbidden, 404 Probes, Repeating, Bot traffic, Curl requests, Non-HTTP, plus `Alert terkait (N)` group filter pills.
 
-### 7. Incident Case Management
-- Group selected alerts into named incident cases with category, severity, analysis, conclusion, and recommendation.
+### 8. Incident Case Management
+- Group selected alerts into named incident cases with category, severity, analysis, conclusion, and recommendation, or save AI Triage groups directly to Incidents in one click (**Simpan ke Insiden**).
 - Add or remove evidence (alert group members) from the inspector or case editor.
 - Tenant-scoped case policy: a scoped case must have evidence in that tenant.
 
-### 8. Local Threat Intelligence
+### 9. Local Threat Intelligence
 - Zero external API exposure: joins `source_ip` with local PostgreSQL intelligence tables (`ip_intel_cache`).
 - AbuseIPDB confidence score, VirusTotal detection count, ISP, and country code.
 - Direct pivot link to local IP intelligence dashboard.
 
-### 9. Privacy-First Redactor
+### 10. Privacy-First Redactor
 - **Zero-Cloud Log Transmission**: Raw logs, database records, and credentials never leave your local environment.
 - **One-Click Sanitizer**: Deterministic regex redactor masks private IPs, public IPs, passwords/tokens, and emails.
 - Explicit disclaimer: redaction is not a guarantee of safe external sharing.
 
-### 10. Official Deliverables (5 Export Paths)
+### 11. Official Deliverables (5 Export Paths)
 - **📋 Clipboard HTML** — formatted table for Google Docs paste.
 - **📄 Word (.docx)** — formal landscape document with styled tables.
 - **📊 Excel (.xlsx)** — multi-column spreadsheet with Threat Intel metrics.
@@ -104,9 +126,9 @@ produced it.
 | Stage | What happens | Output |
 |---|---|---|
 | **Read** | Parse ES hits, JSONL, paste, Active Response JSON, Vulnerability Detector metadata. | Normalized alert + nested origin. |
-| **Classify** | Rule profile + groups + severity + context. Unknown rules stay `needs_review`. | `verdict`, `role`, `priority`, `confidence`, `signals`, `reason`. |
-| **Correlate** | Link responses to origins; cluster by host + rule; collect source IPs as facets; order stages. | Canonical groups + `chain` + response evidence. |
-| **Triage** | Review status, filters, selection, incident cases. | Scoped evidence and case narrative. |
+| **Classify** | Rule profile + groups + payload/UA exploit indicators + severity + context. Unknown rules stay `needs_review`. | `verdict`, `role`, `priority`, `confidence`, `signals`, `reason`. |
+| **Correlate & AI Triage** | Link responses to origins; cluster by rule description or host + rule per tenant; enforce 17:00 WIB daily window; optional local Ollama review with `lock_tp` guardrail. | Canonical single-tenant groups + `chain` + persistent AI triage state. |
+| **Triage** | Review status, `alert_ids` group drill-down, filters, selection, incident cases. | Scoped evidence and case narrative. |
 | **Deliver** | HTML, DOCX, XLSX, TSV, Markdown. | Bounded, scoped, redaction-aware output. |
 
 ### Verdict semantics that avoid false certainty
@@ -143,12 +165,15 @@ classification policy, correlation rules, and failure modes.
 
 ```
 app/
-├── index.html                      # Modular shell (64 lines)
+├── index.html                      # Modular shell
 ├── main.py                         # FastAPI backend + REST API
-├── query.py                        # SQL query builder with filter presets
-├── database.py                     # PostgreSQL layer + schema migration
+├── query.py                        # SQL query builder with filter presets & malicious spotter
+├── database.py                     # PostgreSQL layer, profile switching & schema migration
 ├── parser.py                       # Multi-format log dissector
-├── wazuh_intel.py                  # Read nested alerts, classify, correlate
+├── wazuh_intel.py                  # Read nested alerts, payload indicators, classify, correlate
+├── ai_triage.py                    # Local Ollama + heuristic triage, tenant/17:00 WIB windowing
+├── settings.py                     # Wazuh Indexer, Realtime & AI configuration store
+├── secure_store.py                 # Local Fernet encryption for credentials at rest
 ├── core.py                         # Normalization, deduplication, correlation
 ├── privacy.py                      # Deterministic redactor
 ├── exports.py                      # .docx, .xlsx, Markdown, HTML, TSV
@@ -159,13 +184,13 @@ app/
 │   │   ├── base.css                # Reset, typography
 │   │   ├── shell.css               # Sidebar, workspace grid, responsive
 │   │   └── components.css          # All component styles
-│   └── js/                         # 22 ES modules (feature-based)
+│   └── js/                         # Modular ES features
 │       ├── app.js                  # Shell controller + hash router integration
-│       ├── router.js               # Hash router (#/triage, #/incidents/:id, …)
+│       ├── router.js               # Hash router (#/triage, #/ai-triage, #/incidents/:id, …)
 │       ├── api/client.js           # Same-origin fetch wrapper
 │       ├── state/                  # Scope, selection, navigation, triage, workspace
 │       ├── ui/primitives.js        # Shared UI utilities
-│       └── features/               # triage/, incidents/, imports/, reports/
+│       └── features/               # triage/, ai-triage/, realtime/, stats/, incidents/, imports/, reports/, database/, settings/
 ```
 
 - **Backend**: Python 3.11+, FastAPI, Uvicorn, Psycopg 3
@@ -218,17 +243,19 @@ cp .env.example .env
 
 ## 📖 SOC Analyst Quickstart Workflow
 
-1. **Navigate to Impor** (`#/imports`) — paste your raw Wazuh / Elasticsearch JSON or upload `.json`/`.txt` files. Alerts are parsed, nested Active Response origins are read, classified, deduplicated, and enriched.
+1. **Navigate to Impor** (`#/imports`) or **Realtime** (`#/realtime`) — paste/upload your raw Wazuh / Elasticsearch JSON or pull live alerts from Wazuh Indexer. Alerts are parsed, nested Active Response origins are read, classified, deduplicated, and enriched.
 
-2. **Select Tenant** — use the workspace selector in the utility bar to isolate by tenant (e.g. `wicida`, `sgu`) or view all tenants.
+2. **Select Tenant** — use the workspace selector in the utility bar (or inside AI Triage) to isolate by tenant (e.g. `wicida`, `sgu`) or view all tenants.
 
-3. **Triage** (`#/triage`) — filter with presets (403, 404 Probes, Bot, Curl, Repeating), sort by severity/time/hits. Click any alert to open the sidebar inspector with full details, nested origin, classification signals, and IP intel.
+3. **Run AI Triage** (`#/ai-triage`) — choose tenant, severity band (`Low 0–6`, `Medium 7–11`, `High 12–14`, `Critical 15+`), custom alert limit, and grouping basis (`Deskripsi Rule` or `Host / Agent + Rule`). Review True Positive / False Positive groups (saved automatically with a daily **17:00 WIB** window cutoff), click **Buka di Triage** to inspect only the alerts in that group, or click **Simpan ke Insiden** to persist groups as incident cases.
 
-4. **Review correlation** — click **Korelasi** to see host+rule groups, linked Active Response evidence, source-IP facets, and ordered stages. Responses stay attached to their origin instead of appearing as separate attacks.
+4. **Triage** (`#/triage`) — filter with presets (403, 404 Probes, Bot, Curl, Repeating) or group `alert_ids`, sort by severity/time/hits. Click any alert to open the sidebar inspector with full details, nested origin, classification signals, and IP intel.
 
-5. **Group into Incident** — Shift+Click to select alerts, click "Buat insiden" on the selection toolbar. Add title, category, severity, analysis, conclusion, and recommendation.
+5. **Review correlation** — click **Korelasi** to see host+rule groups, linked Active Response evidence, source-IP facets, and ordered stages. Responses stay attached to their origin instead of appearing as separate attacks.
 
-6. **Export** (`#/reports`) — choose scope (current filter or selected alerts), pick format (Clipboard HTML, .docx, .xlsx, TSV, Markdown), and export.
+6. **Group into Incident** — Shift+Click to select alerts, click "Buat insiden" on the selection toolbar. Add title, category, severity, analysis, conclusion, and recommendation.
+
+7. **Export** (`#/reports`) — choose scope (current filter, incident case, or selected alerts), pick format (Clipboard HTML, .docx, .xlsx, TSV, Markdown), and export.
 
 ---
 
