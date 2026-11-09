@@ -82,7 +82,52 @@ def query_abuseipdb(ip: str, api_key: str | None = None) -> dict[str, Any]:
         raise RuntimeError(f"AbuseIPDB network error: {exc}") from exc
 
 
-def enrich_ip(ip: str, api_key: str | None = None) -> dict[str, Any]:
+def _resolve_remote_db_url() -> str:
+    """Resolve the active remote IP Intel database URL (including runtime overrides from #/database)."""
+    try:
+        import app.database as _db_mod
+        prof = getattr(_db_mod, "_db_profiles", {}).get("remote", {})
+        url = str(prof.get("url") or "").strip()
+        if url:
+            return url
+    except Exception:
+        pass
+    return str(REMOTE_DATABASE_URL or "").strip()
+
+
+def lookup_remote_ip_cache(ip: str, remote_url: str | None = None) -> dict[str, Any] | None:
+    """Look up an existing IP record in the remote IP Intel PostgreSQL database."""
+    target_url = str(remote_url or _resolve_remote_db_url()).strip()
+    if not target_url:
+        return None
+    try:
+        import psycopg  # type: ignore
+        from psycopg.rows import dict_row  # type: ignore
+        with psycopg.connect(target_url, connect_timeout=3, row_factory=dict_row) as rconn:
+            row = rconn.execute(
+                "SELECT ip, abuse_score, vt_malicious, country_code, isp FROM public.ip_intel_cache WHERE ip = %s",
+                (ip,),
+            ).fetchone()
+            if row and row.get("abuse_score") is not None:
+                return {
+                    "ip": ip,
+                    "status": "enriched",
+                    "abuse_score": int(row.get("abuse_score") or 0),
+                    "vt_malicious": int(row.get("vt_malicious") or 0),
+                    "country_code": row.get("country_code"),
+                    "isp": row.get("isp") or "Unknown ISP",
+                    "domain": None,
+                    "usage_type": None,
+                    "total_reports": 0,
+                    "reputation_source": "ip_intel_db",
+                    "is_private": False,
+                }
+    except Exception as exc:
+        logger.debug("Remote IP Intel DB lookup skipped: %s", exc)
+    return None
+
+
+def enrich_ip(ip: str, api_key: str | None = None, remote_url: str | None = None) -> dict[str, Any]:
     """Enriches a single IP address with threat intelligence."""
     clean_ip = ip.strip()
     if not is_valid_ip(clean_ip):
@@ -109,29 +154,46 @@ def enrich_ip(ip: str, api_key: str | None = None) -> dict[str, Any]:
             "is_private": True,
         }
 
-    try:
-        data = query_abuseipdb(clean_ip, api_key)
-        score = int(data.get("abuseConfidenceScore") or 0)
-        return {
-            "ip": clean_ip,
-            "status": "enriched",
-            "abuse_score": score,
-            "vt_malicious": 0,
-            "country_code": data.get("countryCode"),
-            "isp": data.get("isp") or "Unknown ISP",
-            "domain": data.get("domain"),
-            "usage_type": data.get("usageType"),
-            "total_reports": int(data.get("totalReports") or 0),
-            "reputation_source": "abuseipdb",
-            "is_private": False,
-        }
-    except Exception as exc:
-        return {
-            "ip": clean_ip,
-            "status": "error",
-            "error": str(exc),
-            "abuse_score": None,
-        }
+    effective_key = (api_key or ABUSEIPDB_API_KEY or "").strip()
+    if effective_key:
+        try:
+            data = query_abuseipdb(clean_ip, effective_key)
+            score = int(data.get("abuseConfidenceScore") or 0)
+            return {
+                "ip": clean_ip,
+                "status": "enriched",
+                "abuse_score": score,
+                "vt_malicious": 0,
+                "country_code": data.get("countryCode"),
+                "isp": data.get("isp") or "Unknown ISP",
+                "domain": data.get("domain"),
+                "usage_type": data.get("usageType"),
+                "total_reports": int(data.get("totalReports") or 0),
+                "reputation_source": "abuseipdb",
+                "is_private": False,
+            }
+        except Exception as exc:
+            remote_cached = lookup_remote_ip_cache(clean_ip, remote_url)
+            if remote_cached:
+                return remote_cached
+            return {
+                "ip": clean_ip,
+                "status": "error",
+                "error": str(exc),
+                "abuse_score": None,
+            }
+
+    # If no AbuseIPDB API key is configured, pull directly from the remote IP Intel database cache
+    remote_cached = lookup_remote_ip_cache(clean_ip, remote_url)
+    if remote_cached:
+        return remote_cached
+
+    return {
+        "ip": clean_ip,
+        "status": "error",
+        "error": "AbuseIPDB API key belum diatur di Pengaturan dan IP belum ditemukan di database PC Intel (Remote).",
+        "abuse_score": None,
+    }
 
 
 def upsert_ip_cache(conn: Any, enriched: dict[str, Any]) -> None:
@@ -162,13 +224,14 @@ def upsert_ip_cache(conn: Any, enriched: dict[str, Any]) -> None:
     )
 
 
-def sync_remote_cache(enriched_list: list[dict[str, Any]]) -> None:
+def sync_remote_cache(enriched_list: list[dict[str, Any]], remote_url: str | None = None) -> None:
     """Attempts best-effort mirror to remote IP Intel database if reachable."""
-    if not REMOTE_DATABASE_URL or not enriched_list:
+    target_url = str(remote_url or _resolve_remote_db_url()).strip()
+    if not target_url or not enriched_list:
         return
     try:
         import psycopg  # type: ignore
-        with psycopg.connect(REMOTE_DATABASE_URL, connect_timeout=3) as rconn:
+        with psycopg.connect(target_url, connect_timeout=3) as rconn:
             with rconn.cursor() as cur:
                 for item in enriched_list:
                     if item.get("status") not in ("invalid", "error"):

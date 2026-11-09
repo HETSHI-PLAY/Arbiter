@@ -59,6 +59,10 @@ export const DEFAULT_SETTINGS = {
     model: 'hf.co/XHToken/Spark-X2.6-4B-GGUF:Q4_K_M',
     timeout_seconds: 90,
   },
+  intel: {
+    web_url: 'http://localhost:3001',
+    abuseipdb_key_set: false,
+  },
   ui: {sidebar_default: 'expanded'},
 };
 
@@ -79,7 +83,7 @@ const clone = value => JSON.parse(JSON.stringify(value));
 export function normalizeSettings(value) {
   const base = clone(DEFAULT_SETTINGS);
   if (!value || typeof value !== 'object') return base;
-  for (const section of ['wazuh', 'realtime', 'ai', 'ui']) {
+  for (const section of ['wazuh', 'realtime', 'ai', 'intel', 'ui']) {
     if (value[section] && typeof value[section] === 'object') Object.assign(base[section], value[section]);
   }
   base.wazuh.enabled = Boolean(base.wazuh.enabled);
@@ -107,6 +111,9 @@ export function normalizeSettings(value) {
   base.ai.base_url = normalizeOllamaBaseUrl(base.ai.base_url);
   const aiTimeout = Number(base.ai.timeout_seconds);
   base.ai.timeout_seconds = Number.isFinite(aiTimeout) && aiTimeout >= 10 && aiTimeout <= 180 ? aiTimeout : 90;
+  const rawWebUrl = String(base.intel.web_url || '').trim().replace(/\/ip\/?$/i, '').replace(/\/+$/, '');
+  base.intel.web_url = rawWebUrl || 'http://localhost:3001';
+  base.intel.abuseipdb_key_set = Boolean(base.intel.abuseipdb_key_set);
   if (!['expanded', 'collapsed'].includes(base.ui.sidebar_default)) base.ui.sidebar_default = 'expanded';
   return base;
 }

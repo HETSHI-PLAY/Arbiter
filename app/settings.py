@@ -47,6 +47,9 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "model": "hf.co/XHToken/Spark-X2.6-4B-GGUF:Q4_K_M",
         "timeout_seconds": 90,
     },
+    "intel": {
+        "web_url": "http://localhost:3001",
+    },
     "ui": {
         "sidebar_default": "expanded",
     },
@@ -224,6 +227,24 @@ def validate_settings(payload: dict[str, Any], current: dict[str, Any] | None = 
         raise ValueError("Timeout AI harus antara 10 dan 180 detik.")
     ai["timeout_seconds"] = ai_timeout
 
+    intel = settings.get("intel")
+    if not isinstance(intel, dict):
+        raise ValueError("Bagian intel tidak valid.")
+    web_url = _text(intel.get("web_url"), "intel.web_url", 300) or "http://localhost:3001"
+    if not _URL.match(web_url):
+        raise ValueError("URL IP Intel harus diawali http:// atau https:// dan tanpa spasi.")
+    intel["web_url"] = re.sub(r"/ip/?$", "", web_url.rstrip("/"), flags=re.IGNORECASE).rstrip("/") or "http://localhost:3001"
+    abuse_key = intel.pop("abuseipdb_api_key", None)
+    if abuse_key is not None:
+        if not isinstance(abuse_key, str):
+            raise ValueError("intel.abuseipdb_api_key tidak valid.")
+        if len(abuse_key) > 500:
+            raise ValueError("intel.abuseipdb_api_key terlalu panjang.")
+        intel["abuseipdb_key_enc"] = encrypt_text(abuse_key.strip()) if abuse_key.strip() else ""
+    intel.setdefault("abuseipdb_key_enc", "")
+    if not isinstance(intel["abuseipdb_key_enc"], str):
+        raise ValueError("intel.abuseipdb_key_enc tidak valid.")
+
     ui = settings.get("ui")
     if not isinstance(ui, dict):
         raise ValueError("Bagian ui tidak valid.")
@@ -244,6 +265,10 @@ def redact_settings(settings: dict[str, Any]) -> dict[str, Any]:
     wazuh.pop("_legacy_plaintext", None)
     wazuh["password_set"] = bool(password_enc)
     wazuh["auth_configured"] = bool(result["wazuh"].get("indexer_url"))
+    intel = result.setdefault("intel", {"web_url": "http://localhost:3001"})
+    abuse_key_enc = intel.pop("abuseipdb_key_enc", "") or ""
+    intel.pop("abuseipdb_api_key", None)
+    intel["abuseipdb_key_set"] = bool(abuse_key_enc)
     return result
 
 
@@ -331,6 +356,18 @@ def wazuh_password(settings: dict[str, Any]) -> str:
     """Decrypt the stored password in memory only; never log or return it."""
     wazuh = settings.get("wazuh", {})
     encrypted = str(wazuh.get("password_enc") or "")
+    if not encrypted:
+        return ""
+    try:
+        return decrypt_text(encrypted)
+    except SecretStoreError:
+        return ""
+
+
+def intel_abuseipdb_key(settings: dict[str, Any]) -> str:
+    """Decrypt the stored AbuseIPDB API key in memory only; never log or return it."""
+    intel = settings.get("intel", {})
+    encrypted = str(intel.get("abuseipdb_key_enc") or "")
     if not encrypted:
         return ""
     try:

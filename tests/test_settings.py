@@ -40,6 +40,50 @@ class SettingsAPITests(unittest.TestCase):
         self.assertNotIn("password", settings["wazuh"])
         self.assertFalse(settings["wazuh"]["password_set"])
 
+    def test_intel_web_url_and_abuseipdb_key_are_configurable_and_redacted(self):
+        saved = self.client.put("/api/settings", json={
+            "intel": {"web_url": "http://192.168.30.10:3001/ip/", "abuseipdb_api_key": "SyntheticAbuseKey999"}
+        })
+        self.assertEqual(saved.status_code, 200, saved.text)
+        intel = saved.json()["settings"]["intel"]
+        self.assertEqual(intel["web_url"], "http://192.168.30.10:3001")
+        self.assertTrue(intel["abuseipdb_key_set"])
+        self.assertNotIn("SyntheticAbuseKey999", saved.text)
+        self.assertNotIn("abuseipdb_key_enc", intel)
+
+        bad = self.client.put("/api/settings", json={"intel": {"web_url": "javascript:alert(1)"}})
+        self.assertEqual(bad.status_code, 400, bad.text)
+
+        captured = {}
+
+        def fake_enrich(ip, api_key=None, remote_url=None):
+            captured["api_key"] = api_key
+            return {"ip": ip, "status": "enriched", "abuse_score": 42, "reputation_source": "abuseipdb"}
+
+        with patch.object(self.api, "enrich_ip", side_effect=fake_enrich), \
+             patch.object(self.api, "upsert_ip_cache"), \
+             patch.object(self.api, "sync_remote_cache") as synced:
+            response = self.client.post("/api/intel/enrich", json={"ips": ["203.0.113.7"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(captured["api_key"], "SyntheticAbuseKey999")
+        synced.assert_called_once()
+        self.assertNotIn("SyntheticAbuseKey999", response.text)
+
+    def test_enrich_ip_falls_back_to_remote_ip_intel_database(self):
+        from app import intel as intel_mod
+        remote_row = {"ip": "9.9.9.9", "status": "enriched", "abuse_score": 77, "reputation_source": "ip_intel_db"}
+        with patch.object(intel_mod, "ABUSEIPDB_API_KEY", ""), \
+             patch.object(intel_mod, "lookup_remote_ip_cache", return_value=remote_row) as looked:
+            result = intel_mod.enrich_ip("9.9.9.9")
+        looked.assert_called_once()
+        self.assertEqual(result["reputation_source"], "ip_intel_db")
+        self.assertEqual(result["abuse_score"], 77)
+
+        with patch.object(intel_mod, "ABUSEIPDB_API_KEY", ""), \
+             patch.object(intel_mod, "lookup_remote_ip_cache", return_value=None):
+            missing = intel_mod.enrich_ip("9.9.9.10")
+        self.assertEqual(missing["status"], "error")
+
     def test_saved_password_is_never_returned_and_survives_partial_updates(self):
         saved = self.client.put("/api/settings", json={
             "wazuh": {

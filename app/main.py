@@ -55,6 +55,7 @@ from app.query import alert_where, normalize_tenants, positive_ids, tenant_claus
 from app.settings import (
     _normalize_wazuh_timestamp,
     _valid_timestamp,
+    intel_abuseipdb_key,
     load_document,
     load_settings,
     migrate_settings,
@@ -472,8 +473,10 @@ def enrich_intel(payload: dict[str, Any], tenant: list[str] = Query(default=["al
 
     results = []
     with get_db() as conn:
+        stored_settings = load_settings(conn)
+        stored_api_key = intel_abuseipdb_key(stored_settings)
         for ip in unique_ips:
-            res = enrich_ip(ip)
+            res = enrich_ip(ip, api_key=stored_api_key or None)
             if res.get("status") not in ("invalid", "error"):
                 upsert_ip_cache(conn, res)
             results.append(res)

@@ -18,6 +18,23 @@ export async function mount(ctx) {
   let users = [];
   let dirty = false;
   const setDirty = value => { dirty = value; };
+  const SETTINGS_PANELS = [
+    ['wazuh', 'Wazuh Indexer', 'pulse'],
+    ['realtime', 'Monitor realtime', 'refresh'],
+    ['ai', 'AI Triage', 'spark'],
+    ['intel', 'IP Intel & Live Enrich', 'search'],
+    ['display', 'Tampilan', 'settings'],
+    ['users', 'Manajemen Pengguna', 'cases'],
+  ];
+  let activePanel = 'wazuh';
+  function showPanel(key) {
+    if (!SETTINGS_PANELS.some(([k]) => k === key)) return;
+    activePanel = key;
+    for (const panel of root.querySelectorAll('[data-settings-panel]')) panel.hidden = panel.dataset.settingsPanel !== key;
+    for (const link of root.querySelectorAll('[data-settings-tab]')) link.setAttribute('aria-current', link.dataset.settingsTab === key ? 'page' : 'false');
+    const footer = root.querySelector('.settings-footer');
+    if (footer) footer.hidden = key === 'users';
+  }
 
   const collect = () => {
     const form = root.querySelector('#settings-form');
@@ -46,11 +63,17 @@ export async function mount(ctx) {
         model: form.elements.ai_model.value.trim(),
         timeout_seconds: Number(form.elements.ai_timeout_seconds.value) || 90,
       },
+      intel: {
+        web_url: (form.elements.intel_web_url?.value || '').trim().replace(/\/ip\/?$/i, '').replace(/\/+$/, '') || 'http://localhost:3001',
+      },
       ui: {sidebar_default: form.elements.sidebar_default.value},
     };
     const password = form.elements.password.value;
     if (password) data.wazuh.password = password;
     else if (form.elements.clear_password?.checked) data.wazuh.password = '';
+    const abuseKey = form.elements.abuseipdb_api_key?.value || '';
+    if (abuseKey) data.intel.abuseipdb_api_key = abuseKey;
+    else if (form.elements.clear_abuseipdb_key?.checked) data.intel.abuseipdb_api_key = '';
     return data;
   };
 
@@ -130,8 +153,13 @@ export async function mount(ctx) {
         </div>
       </header>
 
+      <div class="settings-shell">
+        <nav class="settings-nav" aria-label="Bagian pengaturan">
+          ${SETTINGS_PANELS.map(([key, label, ico]) => `<button type="button" class="settings-nav-link" data-settings-tab="${key}" aria-current="${activePanel === key ? 'page' : 'false'}">${icon(ico)}<span>${esc(label)}</span></button>`).join('')}
+        </nav>
+        <div class="settings-content">
       <form id="settings-form" class="settings-layout" novalidate>
-        <section class="form-section">
+        <section class="form-section" data-settings-panel="wazuh" ${activePanel==='wazuh'?'':'hidden'}>
           <div class="split">
             <div>
               <h2 class="section-heading">Wazuh Indexer</h2>
@@ -173,7 +201,7 @@ export async function mount(ctx) {
           </div>
         </section>
 
-        <section class="form-section">
+        <section class="form-section" data-settings-panel="realtime" ${activePanel==='realtime'?'':'hidden'}>
           <div class="split">
             <div>
               <h2 class="section-heading">Monitor realtime</h2>
@@ -214,7 +242,7 @@ export async function mount(ctx) {
           </div>
         </section>
 
-        <section class="form-section">
+        <section class="form-section" data-settings-panel="ai" ${activePanel==='ai'?'':'hidden'}>
           <div class="split">
             <div>
               <h2 class="section-heading">AI Triage</h2>
@@ -249,7 +277,30 @@ export async function mount(ctx) {
           <p class="meta">${esc(aiLabel(data))}</p>
         </section>
 
-        <section class="form-section">
+        <section class="form-section" data-settings-panel="intel" ${activePanel==='intel'?'':'hidden'}>
+          <div class="split">
+            <div>
+              <h2 class="section-heading">IP Intel &amp; Live Enrich</h2>
+              <p class="meta">Atur alamat web project <strong>IP Intel</strong> untuk tombol <em>Buka IP Intel ↗</em> di Triage, serta kunci API AbuseIPDB untuk tombol <em>Live Enrich</em>. Saat Live Enrich ditekan, hasil reputasi IP disimpan ke database aktif dan otomatis disinkronkan ke database <strong>PC Intel (Remote)</strong> yang diatur di menu <a href="#/database">Database</a>.</p>
+            </div>
+            <span class="badge ${data.intel?.abuseipdb_key_set ? 'success' : 'neutral'}"><span class="status-dot"></span>${data.intel?.abuseipdb_key_set ? 'API Key tersimpan' : 'Sinkron DB IP Intel'}</span>
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label for="intel-web-url">URL Web IP Intel</label>
+              <input class="input mono" id="intel-web-url" name="intel_web_url" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://localhost:3001 atau http://192.168.x.x:3001" value="${esc(data.intel?.web_url || 'http://localhost:3001')}">
+              <span class="meta">Tombol <strong>Buka IP Intel ↗</strong> di Triage akan membuka <span class="mono">${esc((data.intel?.web_url || 'http://localhost:3001').replace(/\/+$/, ''))}/ip/&lt;source_ip&gt;</span>.</span>
+            </div>
+            <div class="field">
+              <label for="intel-abuse-key">AbuseIPDB API Key (opsional untuk Live Enrich)</label>
+              <input class="input mono" id="intel-abuse-key" name="abuseipdb_api_key" type="password" autocomplete="new-password" placeholder="${data.intel?.abuseipdb_key_set ? 'Tersimpan terenkripsi — kosongkan untuk mempertahankan' : 'Isi API Key AbuseIPDB v2 (atau lewat .env ABUSEIPDB_API_KEY)'}">
+              ${data.intel?.abuseipdb_key_set ? '<label class="checkbox-label meta"><input type="checkbox" name="clear_abuseipdb_key"> Hapus API Key tersimpan</label>' : '<span class="meta">Jika dikosongkan, Live Enrich akan memakai <span class="mono">ABUSEIPDB_API_KEY</span> di <span class="mono">.env</span> atau menarik cache langsung dari database PC Intel (Remote).</span>'}
+            </div>
+          </div>
+          <p class="meta">Untuk mengatur koneksi PostgreSQL ke database project IP Intel, buka menu <a href="#/database">Database</a> lalu ubah URI pada profil <strong>PC Intel (Remote)</strong>.</p>
+        </section>
+
+        <section class="form-section" data-settings-panel="display" ${activePanel==='display'?'':'hidden'}>
           <h2 class="section-heading">Tampilan</h2>
           <div class="form-grid">
             <div class="field">
@@ -263,13 +314,13 @@ export async function mount(ctx) {
           </div>
         </section>
 
-        <div class="settings-footer">
+        <div class="settings-footer" ${activePanel==='users'?'hidden':''}>
           <span class="meta">${esc(wazuhSummary(data))}</span>
           <button class="button primary" type="submit">${icon('check')} Simpan pengaturan</button>
         </div>
       </form>
 
-      <section class="form-section" id="user-management-section" style="margin-top:var(--space-5)">
+      <section class="form-section" id="user-management-section" data-settings-panel="users" ${activePanel==='users'?'':'hidden'}>
         <div class="split">
           <div>
             <h2 class="section-heading">Manajemen Pengguna (Khusus Admin)</h2>
@@ -327,7 +378,9 @@ export async function mount(ctx) {
             <span class="inline-status" id="user-mgmt-status" role="status"></span>
           </div>
         </form>
-      </section>`;
+      </section>
+        </div>
+      </div>`;
   }
 
   async function loadUsers() {
@@ -373,6 +426,8 @@ export async function mount(ctx) {
   }, {signal});
 
   root.addEventListener('click', async event => {
+    const tab = event.target.closest('[data-settings-tab]');
+    if (tab) { showPanel(tab.dataset.settingsTab); return; }
     const connectionButton = event.target.closest('[data-action=test-connection]');
     if (connectionButton) { await testConnection(connectionButton); return; }
     const modelButton = event.target.closest('[data-action=test-model]');
