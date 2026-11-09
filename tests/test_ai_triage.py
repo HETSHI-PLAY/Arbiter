@@ -322,6 +322,30 @@ class AITriageAPITests(unittest.TestCase):
         self.assertIn("24 jam", response.json()["reason"])
         mocked.assert_not_called()
 
+        # Custom time range bypasses the daily 24h gate and forwards normalized WIB timestamps
+        with patch.object(self.api, "wazuh_search", return_value=[]) as mocked_custom:
+            custom_resp = self.client.post(
+                "/api/realtime/pull",
+                json={
+                    "time_from": "08/11/2026 17.00.00",
+                    "time_to": "09/11/2026 09.30.00",
+                    "max_alerts": 1000,
+                    "min_rule_level": 7,
+                    "max_rule_level": 11,
+                },
+            )
+        self.assertEqual(custom_resp.status_code, 200, custom_resp.text)
+        body = custom_resp.json()
+        self.assertEqual(body["status"], "pulled")
+        self.assertTrue(body["custom_range"])
+        self.assertEqual(body["time_from"], "2026-11-08T17:00:00+0700")
+        self.assertEqual(body["time_to"], "2026-11-09T09:30:00+0700")
+        mocked_custom.assert_called_once()
+        call_kwargs = mocked_custom.call_args.kwargs
+        self.assertEqual(call_kwargs["since"], "2026-11-08T17:00:00+0700")
+        self.assertEqual(call_kwargs["until"], "2026-11-09T09:30:00+0700")
+        self.assertEqual(call_kwargs["size"], 1000)
+
     def test_ai_triage_save_persists_verdict_groups(self):
         self.db.add_alert(4, "Alpha", rule_level=10, description="brute force", source_ip="1.2.3.4")
         self.db.add_alert(5, "Alpha", rule_level=10, description="brute force", source_ip="1.2.3.4")

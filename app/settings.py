@@ -351,13 +351,50 @@ def wazuh_alert_query(
 
 
 def _normalize_wazuh_timestamp(value: str) -> str:
-    """Convert an ISO timestamp to the form Wazuh Indexer's date field accepts.
+    """Convert an ISO or human timestamp to the form Wazuh Indexer's date field accepts.
 
     Python's ``datetime.isoformat()`` emits ``+00:00``; Wazuh alert documents
     (and the indexer's strict date parser) use ``+0000``. A colon in the offset
     makes the range query fail with HTTP 400, so collapse it here.
+    Also accepts ``DD/MM/YYYY HH:MM(:SS)``, ``DD/MM/YYYY HH.MM(.SS)``, and
+    naive ``YYYY-MM-DDTHH:MM(:SS)`` (assumed WIB ``+0700``).
     """
     text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.lower() == "now":
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
+
+    # Match DD/MM/YYYY [HH[:.]MM([:.]SS)]
+    m_dmy = re.match(
+        r"^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})(?:[T\s]+(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?)?(?:\s*(?:WIB|UTC|Z|[+-]\d{2}:?\d{2}))?$",
+        text,
+        re.IGNORECASE,
+    )
+    if m_dmy:
+        day, month, year = int(m_dmy.group(1)), int(m_dmy.group(2)), int(m_dmy.group(3))
+        hour = int(m_dmy.group(4) or 0)
+        minute = int(m_dmy.group(5) or 0)
+        second = int(m_dmy.group(6) or 0)
+        tz_suffix = "+0700"
+        tz_match = re.search(r"(Z|[+-]\d{2}:?\d{2})$", text, re.IGNORECASE)
+        if tz_match:
+            raw_tz = tz_match.group(1).upper()
+            tz_suffix = "+0000" if raw_tz == "Z" else raw_tz.replace(":", "")
+        elif text.upper().endswith("UTC"):
+            tz_suffix = "+0000"
+        return f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}{tz_suffix}"
+
+    # Match naive YYYY-MM-DD[T ]HH:MM(:SS) (from <input type="datetime-local"> or manual input)
+    m_iso_naive = re.match(
+        r"^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2})[:.](\d{2})(?:[:.](\d{2}))?$",
+        text,
+    )
+    if m_iso_naive:
+        year_s, month_s, day_s, hour_s, min_s = m_iso_naive.groups()[:5]
+        sec_s = m_iso_naive.group(6) or "00"
+        return f"{year_s}-{month_s}-{day_s}T{hour_s}:{min_s}:{sec_s}+0700"
+
     text = re.sub(r"([+-]\d{2}):(\d{2})$", r"\1\2", text)
     return text
 
@@ -365,11 +402,12 @@ def _normalize_wazuh_timestamp(value: str) -> str:
 def _valid_timestamp(value: str) -> bool:
     """True when the value parses as a real instant (guards against sending a
     garbage string that would 400 the indexer)."""
-    text = str(value or "").strip()
+    text = _normalize_wazuh_timestamp(value)
     if not text:
         return False
+    iso_candidate = re.sub(r"([+-]\d{2})(\d{2})$", r"\1:\2", text)
     try:
-        datetime.fromisoformat(text.replace("Z", "+00:00"))
+        datetime.fromisoformat(iso_candidate.replace("Z", "+00:00"))
         return True
     except ValueError:
         return False
@@ -519,15 +557,15 @@ def wazuh_search(
     verify_tls: bool,
     size: int = 500,
     since: str = "",
+    until: str = "",
     min_rule_level: int = MIN_RULE_LEVEL,
     max_rule_level: int | None = None,
     timeout: float = 10.0,
 ) -> list[dict[str, Any]]:
     """Pull alert documents from the Wazuh Indexer within the configured severity range.
 
-    Returns a list of raw ``_source`` documents (newest first). ``since`` is an
-    optional ISO timestamp lower bound on the alert ``timestamp`` field so that
-    interval/daily pulls only fetch alerts newer than the previous pull.
+    Returns a list of raw ``_source`` documents (newest first). ``since`` and ``until``
+    are optional timestamp bounds on the alert ``timestamp`` field.
     """
     base = str(indexer_url or "").strip().rstrip("/")
     if not base or not _URL.match(base):
@@ -542,10 +580,17 @@ def wazuh_search(
     if max_rule_level is not None:
         level_range["lte"] = int(max_rule_level)
     must_clauses: list[dict[str, Any]] = [{"range": {"rule.level": level_range}}]
+    ts_range: dict[str, str] = {}
     if since and str(since).strip():
-        ts = _normalize_wazuh_timestamp(str(since))
-        if _valid_timestamp(ts):
-            must_clauses.append({"range": {"timestamp": {"gte": ts}}})
+        ts_since = _normalize_wazuh_timestamp(str(since))
+        if _valid_timestamp(ts_since):
+            ts_range["gte"] = ts_since
+    if until and str(until).strip():
+        ts_until = _normalize_wazuh_timestamp(str(until))
+        if _valid_timestamp(ts_until):
+            ts_range["lte"] = ts_until
+    if ts_range:
+        must_clauses.append({"range": {"timestamp": ts_range}})
     query_obj: dict[str, Any] = (
         must_clauses[0] if len(must_clauses) == 1 else {"bool": {"must": must_clauses}}
     )

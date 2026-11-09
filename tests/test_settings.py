@@ -286,6 +286,36 @@ class SettingsAPITests(unittest.TestCase):
         )
         self.assertNotIn("+00:00", json_module.dumps(sent))
 
+        # Test DD/MM/YYYY HH.MM.SS and until parameter
+        with patch("app.settings._wazuh_opener", return_value=FakeOpener200()):
+            wazuh_search(
+                indexer_url="https://wazuh.lab:9200",
+                username="analyst",
+                password="secret",
+                index_pattern="wazuh-alerts-*",
+                verify_tls=True,
+                size=250,
+                since="08/11/2026 17.00.00",
+                until="09/11/2026 08:30:00",
+                min_rule_level=7,
+                max_rule_level=11,
+            )
+        sent_range = json_module.loads(captured["request"].data.decode("utf-8"))
+        self.assertEqual(
+            sent_range["query"]["bool"]["must"],
+            [
+                {"range": {"rule.level": {"gte": 7, "lte": 11}}},
+                {
+                    "range": {
+                        "timestamp": {
+                            "gte": "2026-11-08T17:00:00+0700",
+                            "lte": "2026-11-09T08:30:00+0700",
+                        }
+                    }
+                },
+            ],
+        )
+
     def test_wazuh_http_error_reason_surfaces_upstream_body(self):
         from app.settings import _http_error_reason
         import urllib.error as urlerror

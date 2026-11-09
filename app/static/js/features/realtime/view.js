@@ -14,6 +14,48 @@ export async function mount(ctx) {
   let history = [];
   let timer = null;
   let pulling = false;
+  let customTimeFrom = '';
+  let customTimeTo = '';
+  let customMaxAlerts = '';
+
+  function formatWibInput(date) {
+    const pad = n => String(n).padStart(2, '0');
+    const wibMs = date.getTime() + (date.getTimezoneOffset() + 420) * 60000;
+    const d = new Date(wibMs);
+    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}.${pad(d.getMinutes())}.${pad(d.getSeconds())}`;
+  }
+
+  function applyPreset(preset) {
+    const now = new Date();
+    const wibMs = now.getTime() + (now.getTimezoneOffset() + 420) * 60000;
+    const wibNow = new Date(wibMs);
+    const pad = n => String(n).padStart(2, '0');
+    if (preset === 'wib-17-yesterday') {
+      const y = new Date(wibNow);
+      y.setDate(y.getDate() - 1);
+      customTimeFrom = `${pad(y.getDate())}/${pad(y.getMonth() + 1)}/${y.getFullYear()} 17.00.00`;
+      customTimeTo = '';
+    } else if (preset === '1h') {
+      customTimeFrom = formatWibInput(new Date(now.getTime() - 3600 * 1000));
+      customTimeTo = '';
+    } else if (preset === '6h') {
+      customTimeFrom = formatWibInput(new Date(now.getTime() - 6 * 3600 * 1000));
+      customTimeTo = '';
+    } else if (preset === '24h') {
+      customTimeFrom = formatWibInput(new Date(now.getTime() - 24 * 3600 * 1000));
+      customTimeTo = '';
+    } else if (preset === '7d') {
+      customTimeFrom = formatWibInput(new Date(now.getTime() - 7 * 24 * 3600 * 1000));
+      customTimeTo = '';
+    } else if (preset === 'clear') {
+      customTimeFrom = '';
+      customTimeTo = '';
+    }
+    const fromInput = root.querySelector('#realtime-time-from');
+    const toInput = root.querySelector('#realtime-time-to');
+    if (fromInput) fromInput.value = customTimeFrom;
+    if (toInput) toInput.value = customTimeTo;
+  }
 
   function schedule() {
     clearInterval(timer);
@@ -99,11 +141,46 @@ export async function mount(ctx) {
         </section>
 
         <section class="form-section realtime-card">
+          <h2 class="section-heading">Tarik Rentang Waktu (Kustom / Historis)</h2>
+          <p class="section-description">Ambil alert dari Wazuh Indexer dalam rentang waktu bebas tanpa harus menunggu siklus realtime. Waktu tanpa zona otomatis dianggap WIB (UTC+7).</p>
+          <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px;">
+            <button class="button small" type="button" data-preset="wib-17-yesterday">Kemarin 17.00 s/d Sekarang</button>
+            <button class="button small" type="button" data-preset="1h">1 Jam Terakhir</button>
+            <button class="button small" type="button" data-preset="6h">6 Jam Terakhir</button>
+            <button class="button small" type="button" data-preset="24h">24 Jam Terakhir</button>
+            <button class="button small" type="button" data-preset="7d">7 Hari Terakhir</button>
+            <button class="button small ghost" type="button" data-preset="clear">Reset</button>
+          </div>
+          <div class="form-grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px;">
+            <div class="field">
+              <label for="realtime-time-from">Dari waktu (mulai)</label>
+              <input class="input mono" id="realtime-time-from" name="time_from" type="text" value="${esc(customTimeFrom)}" placeholder="08/11/2026 17.00.00">
+              <span class="field-hint">Format <code>DD/MM/YYYY HH.MM.SS</code> atau <code>YYYY-MM-DDTHH:MM:SS</code></span>
+            </div>
+            <div class="field">
+              <label for="realtime-time-to">Sampai waktu (akhir)</label>
+              <input class="input mono" id="realtime-time-to" name="time_to" type="text" value="${esc(customTimeTo)}" placeholder="now (kosong = s/d sekarang)">
+              <span class="field-hint">Kosongkan atau isi <code>now</code> untuk s/d saat ini, atau isi jam spesifik</span>
+            </div>
+            <div class="field">
+              <label for="realtime-custom-max">Maksimal alert ditarik</label>
+              <input class="input" id="realtime-custom-max" name="custom_max_alerts" type="number" min="1" max="5000" value="${esc(customMaxAlerts || String(realtime.max_alerts || 500))}">
+              <span class="field-hint">1–5000 dokumen per penarikan</span>
+            </div>
+          </div>
+          <div class="settings-actions" style="margin-top:12px;">
+            <button class="button primary" data-action="pull-range" type="button" ${pulling || !configured ? 'disabled' : ''}>${icon('refresh')} Tarik sesuai rentang waktu</button>
+          </div>
+        </section>
+
+        <section class="form-section realtime-card" style="grid-column: 1 / -1;">
           <h2 class="section-heading">Riwayat sesi</h2>
-          ${history.length ? `<div class="table-region"><table class="data-table"><thead><tr><th>Waktu</th><th>Status</th><th class="numeric">Baru</th><th class="numeric">Dedup</th></tr></thead><tbody>
+          ${history.length ? `<div class="table-region"><table class="data-table"><thead><tr><th>Waktu</th><th>Rentang</th><th>Status</th><th class="numeric">Diperiksa</th><th class="numeric">Baru</th><th class="numeric">Dedup</th></tr></thead><tbody>
             ${history.map(item => `<tr>
               <td class="mono">${esc(formatTime(item.at))}</td>
+              <td class="mono" style="font-size:12px;">${esc(item.rangeLabel || 'Incremental')}</td>
               <td>${item.status === 'pulled' ? `<span class="inline-status" data-kind="success">Pull OK</span>` : item.status === 'skipped' ? `<span class="inline-status" data-kind="info">Dilewati (harian)</span>` : `<span class="inline-status" data-kind="error">${esc(item.error || 'Gagal')}</span>`}</td>
+              <td class="numeric num">${item.status === 'pulled' ? (item.searched || 0).toLocaleString('id-ID') : '—'}</td>
               <td class="numeric num">${item.status === 'pulled' ? item.inserted.toLocaleString('id-ID') : '—'}</td>
               <td class="numeric num">${item.status === 'pulled' ? item.deduplicated.toLocaleString('id-ID') : '—'}</td>
             </tr>`).join('')}
@@ -112,24 +189,40 @@ export async function mount(ctx) {
       </div>`;
   }
 
-  async function pull() {
+  async function pull(options = {}) {
     if (pulling || !settings?.wazuh?.indexer_url) return;
     pulling = true;
     const started = performance.now();
+    const payload = {
+      min_rule_level: settings.realtime.min_rule_level,
+      max_rule_level: settings.realtime.max_rule_level,
+    };
+    let rangeLabel = 'Sejak pull terakhir';
+    if (options.customRange) {
+      const fromVal = (options.time_from || '').trim();
+      const toVal = (options.time_to || '').trim();
+      if (!fromVal && !toVal) {
+        pulling = false;
+        notify('Isi minimal "Dari waktu" atau pilih salah satu tombol preset rentang waktu.', 'warning');
+        return;
+      }
+      if (fromVal) payload.time_from = fromVal;
+      if (toVal) payload.time_to = toVal;
+      if (options.max_alerts) payload.max_alerts = Number(options.max_alerts);
+      rangeLabel = `${fromVal || 'Awal'} → ${toVal || 'Sekarang'}`;
+    }
     try {
       const result = await json('/api/realtime/pull', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          min_rule_level: settings.realtime.min_rule_level,
-          max_rule_level: settings.realtime.max_rule_level,
-        }),
+        body: JSON.stringify(payload),
         signal,
         timeout: 60000,
       });
       history.unshift({
         at: result.pulled_at || new Date().toISOString(),
         status: result.status,
+        rangeLabel,
         searched: Number(result.searched) || 0,
         inserted: Number(result.inserted) || 0,
         deduplicated: Number(result.deduplicated) || 0,
@@ -137,7 +230,7 @@ export async function mount(ctx) {
         duration: Math.round(performance.now() - started),
       });
       if (result.status === 'pulled') {
-        notify(`${result.inserted} alert baru ditarik · ${result.deduplicated} dedup.`, 'success');
+        notify(`${result.inserted} alert baru ditarik (${result.searched} diperiksa · ${result.deduplicated} dedup).`, 'success');
       } else if (result.status === 'skipped') {
         notify(result.reason || 'Pull harian dilewati.', 'info');
       }
@@ -146,9 +239,11 @@ export async function mount(ctx) {
       history.unshift({
         at: new Date().toISOString(),
         status: 'error',
+        rangeLabel,
         error: error.message,
         duration: Math.round(performance.now() - started),
       });
+      notify(error.message, 'error');
     } finally {
       pulling = false;
       history = history.slice(0, 20);
@@ -182,9 +277,35 @@ export async function mount(ctx) {
     }
   }, {signal});
 
+  root.addEventListener('input', event => {
+    if (event.target.name === 'time_from') customTimeFrom = event.target.value;
+    if (event.target.name === 'time_to') customTimeTo = event.target.value;
+    if (event.target.name === 'custom_max_alerts') customMaxAlerts = event.target.value;
+  }, {signal});
+
   root.addEventListener('click', async event => {
+    const presetBtn = event.target.closest('[data-preset]');
+    if (presetBtn) {
+      applyPreset(presetBtn.dataset.preset);
+      return;
+    }
     const action = event.target.closest('[data-action]')?.dataset.action;
     if (action === 'pull') { await pull(); return; }
+    if (action === 'pull-range') {
+      const fromInput = root.querySelector('#realtime-time-from');
+      const toInput = root.querySelector('#realtime-time-to');
+      const maxInput = root.querySelector('#realtime-custom-max');
+      customTimeFrom = fromInput ? fromInput.value : customTimeFrom;
+      customTimeTo = toInput ? toInput.value : customTimeTo;
+      customMaxAlerts = maxInput ? maxInput.value : customMaxAlerts;
+      await pull({
+        customRange: true,
+        time_from: customTimeFrom,
+        time_to: customTimeTo,
+        max_alerts: customMaxAlerts || settings?.realtime?.max_alerts || 500,
+      });
+      return;
+    }
     if (action === 'toggle') {
       const button = event.target.closest('[data-action=toggle]');
       button.disabled = true;

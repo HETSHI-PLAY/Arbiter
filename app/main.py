@@ -53,6 +53,8 @@ from app.parser import parse_export
 from app.privacy import sanitize_text
 from app.query import alert_where, normalize_tenants, positive_ids, tenant_clause, validated_group_id, PIVOT_DEFINITIONS, FACET_COLUMNS, is_malicious_alert_record
 from app.settings import (
+    _normalize_wazuh_timestamp,
+    _valid_timestamp,
     load_document,
     load_settings,
     migrate_settings,
@@ -1238,6 +1240,11 @@ def api_realtime_pull(payload: dict[str, Any] | None = Body(default=None)):
     min_rule_level = stored_min
     max_rule_level = stored_max
     severity_overridden = False
+    pull_size = int(realtime.get("max_alerts") or 500)
+    custom_time_from = ""
+    custom_time_to = ""
+    custom_range = False
+
     if isinstance(payload, dict):
         if "min_rule_level" in payload and payload["min_rule_level"] is not None and str(payload["min_rule_level"]).strip() != "":
             try:
@@ -1259,12 +1266,39 @@ def api_realtime_pull(payload: dict[str, Any] | None = Body(default=None)):
                 if not 0 <= max_rule_level <= 16 or max_rule_level < min_rule_level:
                     raise HTTPException(status_code=400, detail="max_rule_level tidak valid.")
             severity_overridden = True
+        if "max_alerts" in payload and payload["max_alerts"] is not None and str(payload["max_alerts"]).strip() != "":
+            try:
+                pull_size = int(payload["max_alerts"])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="max_alerts harus berupa angka.") from None
+            if not 1 <= pull_size <= 5000:
+                raise HTTPException(status_code=400, detail="max_alerts harus antara 1 dan 5000.")
+        raw_from = str(payload.get("time_from") or payload.get("since") or "").strip()
+        raw_to = str(payload.get("time_to") or payload.get("until") or "").strip()
+        if raw_from:
+            norm_from = _normalize_wazuh_timestamp(raw_from)
+            if not _valid_timestamp(norm_from):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Format waktu mulai (time_from) tidak valid. Gunakan format DD/MM/YYYY HH.MM.SS atau pilih dari kalender.",
+                )
+            custom_time_from = norm_from
+            custom_range = True
+        if raw_to:
+            norm_to = _normalize_wazuh_timestamp(raw_to)
+            if not _valid_timestamp(norm_to):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Format waktu selesai (time_to) tidak valid. Gunakan format DD/MM/YYYY HH.MM.SS, 'now', atau pilih dari kalender.",
+                )
+            custom_time_to = norm_to
+            custom_range = True
 
     severity_changed = severity_overridden and (min_rule_level, max_rule_level) != (stored_min, stored_max)
 
     mode = str(realtime.get("mode") or "interval")
     last_pull_at = "" if severity_changed else str(realtime.get("last_pull_at") or "").strip()
-    if mode == "daily" and last_pull_at:
+    if not custom_range and mode == "daily" and last_pull_at:
         try:
             last = datetime.fromisoformat(last_pull_at.replace("Z", "+00:00"))
             if last.tzinfo is None:
@@ -1281,6 +1315,9 @@ def api_realtime_pull(payload: dict[str, Any] | None = Body(default=None)):
         except ValueError:
             pass  # Unparseable timestamp: treat as never pulled.
 
+    effective_since = custom_time_from if custom_range else last_pull_at
+    effective_until = custom_time_to if custom_range else ""
+
     try:
         docs = wazuh_search(
             indexer_url=wazuh.get("indexer_url", ""),
@@ -1288,8 +1325,9 @@ def api_realtime_pull(payload: dict[str, Any] | None = Body(default=None)):
             password=wazuh_password(stored),
             index_pattern=wazuh.get("index_pattern", "wazuh-alerts-*"),
             verify_tls=bool(wazuh.get("verify_tls", True)),
-            size=int(realtime.get("max_alerts") or 500),
-            since=last_pull_at,
+            size=pull_size,
+            since=effective_since,
+            until=effective_until,
             min_rule_level=min_rule_level,
             max_rule_level=max_rule_level,
         )
@@ -1307,7 +1345,8 @@ def api_realtime_pull(payload: dict[str, Any] | None = Body(default=None)):
             elif did_dedup:
                 deduplicated += 1
         # Persist the pull timestamp and any updated severity selection.
-        stored["realtime"]["last_pull_at"] = now.isoformat()
+        if not custom_range or not custom_time_to:
+            stored["realtime"]["last_pull_at"] = now.isoformat()
         stored["realtime"]["min_rule_level"] = min_rule_level
         stored["realtime"]["max_rule_level"] = max_rule_level
         save_settings(conn, stored)
@@ -1320,6 +1359,9 @@ def api_realtime_pull(payload: dict[str, Any] | None = Body(default=None)):
         "deduplicated": deduplicated,
         "min_rule_level": min_rule_level,
         "max_rule_level": max_rule_level,
+        "time_from": effective_since,
+        "time_to": effective_until or "now",
+        "custom_range": custom_range,
         "index_pattern": wazuh.get("index_pattern", "wazuh-alerts-*"),
     }
 
