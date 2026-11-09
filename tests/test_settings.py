@@ -346,16 +346,27 @@ class SettingsAPITests(unittest.TestCase):
             403,
         )
 
-        # Both analyst and admin can access and save Rumus Query Wazuh
+        # Both analyst and admin can access and save Rumus Query Wazuh (Notepad & Snippets)
+        pad_res = self.client.put(
+            "/api/wazuh-queries",
+            headers=analyst_headers,
+            json={"notepad": "not (\"payload_1\" or \"payload_2\")"},
+        )
+        self.assertEqual(pad_res.status_code, 200, pad_res.text)
+        self.assertEqual(pad_res.json()["notepad"], "not (\"payload_1\" or \"payload_2\")")
+        self.assertEqual(pad_res.json()["updated_by"], "soc_analyst")
+
         save_q = self.client.post(
             "/api/wazuh-queries",
             headers=analyst_headers,
-            json={"title": "Cek Path Traversal", "dql": "rule.level >= 7 and data.url : \"*..*\"", "category": "Web"},
+            json={"title": "Cek Path Traversal", "content": "not ([payload])", "category": "Web"},
         )
         self.assertEqual(save_q.status_code, 200, save_q.text)
         queries = save_q.json()["queries"]
         self.assertEqual(len(queries), 1)
         self.assertEqual(queries[0]["created_by"], "soc_analyst")
+        self.assertEqual(queries[0]["content"], "not ([payload])")
+        self.assertEqual(save_q.json()["notepad"], "not (\"payload_1\" or \"payload_2\")")
 
 
 if __name__ == "__main__":

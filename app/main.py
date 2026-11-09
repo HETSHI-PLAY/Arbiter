@@ -2294,8 +2294,42 @@ def api_delete_user(username: str, request: Request):
 def api_list_wazuh_queries():
     with get_db() as conn:
         doc = load_document(conn, WAZUH_QUERIES_STATE_KEY, None)
-    items = doc.get("items") if isinstance(doc, dict) and isinstance(doc.get("items"), list) else []
-    return {"items": items, "queries": items}
+    data = doc if isinstance(doc, dict) else {}
+    items = data.get("items") if isinstance(data.get("items"), list) else []
+    notepad = str(data.get("notepad") or "")
+    return {
+        "notepad": notepad,
+        "updated_at": str(data.get("updated_at") or ""),
+        "updated_by": str(data.get("updated_by") or ""),
+        "items": items,
+        "queries": items,
+    }
+
+
+@app.put("/api/wazuh-queries")
+def api_update_wazuh_notepad(payload: dict[str, Any], request: Request):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload notepad tidak valid.")
+    notepad = str(payload.get("notepad") or "")[:100000]
+    user = _extract_request_user(request)
+    author = str(user.get("username") if user else payload.get("author") or "analyst")
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        doc = load_document(conn, WAZUH_QUERIES_STATE_KEY, None)
+        data = dict(doc) if isinstance(doc, dict) else {}
+        items = list(data.get("items")) if isinstance(data.get("items"), list) else []
+        data["notepad"] = notepad
+        data["updated_at"] = now_iso
+        data["updated_by"] = author
+        data["items"] = items
+        save_document(conn, WAZUH_QUERIES_STATE_KEY, data)
+    return {
+        "notepad": notepad,
+        "updated_at": now_iso,
+        "updated_by": author,
+        "items": items,
+        "queries": items,
+    }
 
 
 @app.post("/api/wazuh-queries")
@@ -2303,15 +2337,15 @@ def api_save_wazuh_query(payload: dict[str, Any], request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Payload rumus query tidak valid.")
     title = str(payload.get("title") or "").strip()[:160]
-    category = str(payload.get("category") or "Kustom").strip()[:80] or "Kustom"
-    dql = str(payload.get("dql") or "").strip()[:4000]
+    category = str(payload.get("category") or "Catatan").strip()[:80] or "Catatan"
+    content = str(payload.get("content") or payload.get("dql") or "").strip()[:50000]
     dsl = str(payload.get("dsl") or "").strip()[:8000]
     lucene = str(payload.get("lucene") or "").strip()[:4000]
     description = str(payload.get("description") or "").strip()[:600]
     if not title:
-        raise HTTPException(status_code=400, detail="Judul rumus query wajib diisi.")
-    if not (dql or dsl or lucene):
-        raise HTTPException(status_code=400, detail="Minimal satu rumus query (DQL/KQL, OpenSearch JSON, atau Lucene) wajib diisi.")
+        raise HTTPException(status_code=400, detail="Judul catatan rumus wajib diisi.")
+    if not (content or dsl or lucene):
+        raise HTTPException(status_code=400, detail="Isi rumus query wajib diisi.")
 
     user = _extract_request_user(request)
     author = str(user.get("username") if user else payload.get("author") or "analyst")
@@ -2320,7 +2354,8 @@ def api_save_wazuh_query(payload: dict[str, Any], request: Request):
         "title": title,
         "category": category,
         "description": description,
-        "dql": dql,
+        "content": content,
+        "dql": content,
         "dsl": dsl,
         "lucene": lucene,
         "author": author,
@@ -2329,11 +2364,13 @@ def api_save_wazuh_query(payload: dict[str, Any], request: Request):
     }
     with get_db() as conn:
         doc = load_document(conn, WAZUH_QUERIES_STATE_KEY, None)
-        items = list(doc.get("items")) if isinstance(doc, dict) and isinstance(doc.get("items"), list) else []
+        data = dict(doc) if isinstance(doc, dict) else {}
+        items = list(data.get("items")) if isinstance(data.get("items"), list) else []
         items.insert(0, item)
         items = items[:200]
-        save_document(conn, WAZUH_QUERIES_STATE_KEY, {"items": items})
-    return {"item": item, "items": items, "queries": items}
+        data["items"] = items
+        save_document(conn, WAZUH_QUERIES_STATE_KEY, data)
+    return {"item": item, "items": items, "queries": items, "notepad": str(data.get("notepad") or "")}
 
 
 @app.delete("/api/wazuh-queries/{query_id}")
@@ -2343,9 +2380,11 @@ def api_delete_wazuh_query(query_id: str):
         raise HTTPException(status_code=400, detail="ID rumus query tidak valid.")
     with get_db() as conn:
         doc = load_document(conn, WAZUH_QUERIES_STATE_KEY, None)
-        items = list(doc.get("items")) if isinstance(doc, dict) and isinstance(doc.get("items"), list) else []
+        data = dict(doc) if isinstance(doc, dict) else {}
+        items = list(data.get("items")) if isinstance(data.get("items"), list) else []
         filtered = [it for it in items if str(it.get("id") or "") != target]
         if len(filtered) == len(items):
             raise HTTPException(status_code=404, detail="Rumus query tidak ditemukan.")
-        save_document(conn, WAZUH_QUERIES_STATE_KEY, {"items": filtered})
-    return {"deleted": target, "items": filtered, "queries": filtered}
+        data["items"] = filtered
+        save_document(conn, WAZUH_QUERIES_STATE_KEY, data)
+    return {"deleted": target, "items": filtered, "queries": filtered, "notepad": str(data.get("notepad") or "")}
