@@ -1,6 +1,12 @@
 import {json} from '../../api/client.js';
 import {esc, icon, errorState, loadingRows, formatTime} from '../../ui/primitives.js';
-import {normalizeSettings} from '../settings/model.js';
+import {
+  REALTIME_SEVERITY_OPTIONS,
+  normalizeSettings,
+  parseRealtimeSeverity,
+  realtimeSeverityLabel,
+  realtimeSeveritySelection,
+} from '../settings/model.js';
 
 export async function mount(ctx) {
   const {root, signal, notify} = ctx;
@@ -27,6 +33,8 @@ export async function mount(ctx) {
     const latest = history[0] || null;
     const configured = Boolean(wazuh.indexer_url);
     const modeLabel = realtime.mode === 'daily' ? 'Harian (1× per 24 jam)' : `Setiap ${realtime.interval_seconds} detik`;
+    const sevLabel = realtimeSeverityLabel(realtime);
+    const sevSelection = realtimeSeveritySelection(realtime);
     const last = latest?.status === 'pulled'
       ? `<strong class="num">${latest.inserted.toLocaleString('id-ID')}</strong> alert baru · ${latest.searched.toLocaleString('id-ID')} diperiksa`
       : latest?.status === 'skipped'
@@ -39,7 +47,7 @@ export async function mount(ctx) {
       <header class="page-header">
         <div class="page-heading">
           <h1>Realtime</h1>
-          <p class="page-description">Tarik alert Medium+ (rule.level ≥ 7) dari Wazuh Indexer ke database aktif, lalu kelompokkan di AI Triage. Alert yang sama otomatis digabung (dedup) saat masuk.</p>
+          <p class="page-description">Tarik alert (${esc(sevLabel)}) dari Wazuh Indexer ke database aktif, lalu kelompokkan di AI Triage. Alert yang sama otomatis digabung (dedup) saat masuk.</p>
         </div>
         <div class="page-actions">
           <a class="button" href="#/settings">${icon('settings')} Pengaturan Wazuh</a>
@@ -60,6 +68,15 @@ export async function mount(ctx) {
               <dd class="meta">${realtime.enabled ? modeLabel : 'Polling otomatis dimatikan'}</dd>
             </div>
             <div class="key-value">
+              <dt><label for="realtime-page-severity">Ambang severity</label></dt>
+              <dd>
+                <select class="select" id="realtime-page-severity" name="realtime_severity">
+                  ${REALTIME_SEVERITY_OPTIONS.map(([val, label]) => `<option value="${esc(val)}" ${sevSelection === val ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+                </select>
+              </dd>
+              <dd class="meta">Pilih severity alert yang ditarik saat pull</dd>
+            </div>
+            <div class="key-value">
               <dt>Pull terakhir</dt>
               <dd>${latest ? esc(formatTime(latest.at)) : '—'}</dd>
               <dd class="meta">${latest?.duration ? `${latest.duration} ms` : 'Belum ada data'}</dd>
@@ -67,7 +84,7 @@ export async function mount(ctx) {
             <div class="key-value">
               <dt>Hasil terakhir</dt>
               <dd>${last}</dd>
-              <dd class="meta">Filter: ${esc(wazuh.index_pattern || 'wazuh-alerts-*')} · rule.level ≥ 7 · maks ${realtime.max_alerts} alert/pull</dd>
+              <dd class="meta">Filter: ${esc(wazuh.index_pattern || 'wazuh-alerts-*')} · ${esc(sevLabel)} · maks ${realtime.max_alerts} alert/pull</dd>
             </div>
             <div class="key-value">
               <dt>Indexer</dt>
@@ -100,7 +117,16 @@ export async function mount(ctx) {
     pulling = true;
     const started = performance.now();
     try {
-      const result = await json('/api/realtime/pull', {method: 'POST', signal, timeout: 60000});
+      const result = await json('/api/realtime/pull', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          min_rule_level: settings.realtime.min_rule_level,
+          max_rule_level: settings.realtime.max_rule_level,
+        }),
+        signal,
+        timeout: 60000,
+      });
       history.unshift({
         at: result.pulled_at || new Date().toISOString(),
         status: result.status,
@@ -139,6 +165,22 @@ export async function mount(ctx) {
     window.dispatchEvent(new CustomEvent('arbiter:realtime-changed', {detail: settings.realtime}));
     return settings;
   }
+
+  root.addEventListener('change', async event => {
+    if (event.target.name === 'realtime_severity') {
+      const parsed = parseRealtimeSeverity(event.target.value);
+      try {
+        await saveRealtime({
+          min_rule_level: parsed.min_rule_level,
+          max_rule_level: parsed.max_rule_level,
+        });
+        render();
+        notify(`Ambang severity realtime diubah ke ${realtimeSeverityLabel(settings.realtime)}.`, 'success');
+      } catch (error) {
+        if (error.name !== 'AbortError') notify(error.message, 'error');
+      }
+    }
+  }, {signal});
 
   root.addEventListener('click', async event => {
     const action = event.target.closest('[data-action]')?.dataset.action;

@@ -1,16 +1,29 @@
 import {json} from '../../api/client.js';
 import {esc, icon, errorState, loadingRows} from '../../ui/primitives.js';
-import {normalizeSettings, realtimeLabel, wazuhSummary, aiLabel} from './model.js';
+import {
+  REALTIME_SEVERITY_OPTIONS,
+  normalizeOllamaBaseUrl,
+  normalizeSettings,
+  parseRealtimeSeverity,
+  realtimeLabel,
+  realtimeSeverityLabel,
+  realtimeSeveritySelection,
+  wazuhSummary,
+  aiLabel,
+} from './model.js';
 
 export async function mount(ctx) {
   const {root, signal, notify, setGuard} = ctx;
   let settings = null;
+  let users = [];
   let dirty = false;
   const setDirty = value => { dirty = value; };
 
   const collect = () => {
     const form = root.querySelector('#settings-form');
     if (!form) return null;
+    const parsedSev = parseRealtimeSeverity(form.elements.realtime_severity?.value);
+    const cleanedBaseUrl = normalizeOllamaBaseUrl(form.elements.ai_base_url.value);
     const data = {
       wazuh: {
         enabled: form.elements.wazuh_enabled.checked,
@@ -24,10 +37,12 @@ export async function mount(ctx) {
         interval_seconds: Number(form.elements.interval_seconds.value) || 30,
         mode: form.elements.realtime_mode.value,
         max_alerts: Number(form.elements.max_alerts.value) || 500,
+        min_rule_level: parsedSev.min_rule_level,
+        max_rule_level: parsedSev.max_rule_level,
       },
       ai: {
         enabled: form.elements.ai_enabled.checked,
-        base_url: form.elements.ai_base_url.value.trim() || 'http://127.0.0.1:11434',
+        base_url: cleanedBaseUrl,
         model: form.elements.ai_model.value.trim(),
         timeout_seconds: Number(form.elements.ai_timeout_seconds.value) || 90,
       },
@@ -63,9 +78,17 @@ export async function mount(ctx) {
     renderStatus('Menguji koneksi…');
     try {
       const result = await json('/api/settings/wazuh/test', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(draft.wazuh), signal,
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          ...draft.wazuh,
+          min_rule_level: draft.realtime.min_rule_level,
+          max_rule_level: draft.realtime.max_rule_level,
+        }),
+        signal,
       });
-      const count = Number.isInteger(result.count) ? ` · ${result.count.toLocaleString('id-ID')} alert Medium+ (rule.level ≥ ${result.min_rule_level ?? 7})` : '';
+      const sevLabel = realtimeSeverityLabel(draft.realtime);
+      const count = Number.isInteger(result.count) ? ` · ${result.count.toLocaleString('id-ID')} alert (${sevLabel})` : '';
       renderStatus(`Terhubung${count}`, 'success');
     } catch (error) {
       if (error.name !== 'AbortError') renderStatus(error.message, 'error');
@@ -154,10 +177,17 @@ export async function mount(ctx) {
           <div class="split">
             <div>
               <h2 class="section-heading">Monitor realtime</h2>
-              <p class="meta">Tarik alert Medium+ (rule.level ≥ 7) dari Wazuh Indexer ke database aktif. Pilih mode: <strong>interval</strong> (setiap beberapa detik) atau <strong>harian</strong> (1× per 24 jam, dihitung dari pull terakhir).</p>
+              <p class="meta">Tarik alert sesuai ambang severity yang dipilih (default Medium, rule.level ≥ 7) dari Wazuh Indexer ke database aktif. Pilih mode: <strong>interval</strong> (setiap beberapa detik) atau <strong>harian</strong> (1× per 24 jam, dihitung dari pull terakhir).</p>
             </div>
           </div>
           <div class="form-grid">
+            <div class="field">
+              <label for="realtime-severity">Ambang severity</label>
+              <select class="select" id="realtime-severity" name="realtime_severity">
+                ${REALTIME_SEVERITY_OPTIONS.map(([val, label]) => `<option value="${esc(val)}" ${realtimeSeveritySelection(realtime) === val ? 'selected' : ''}>${esc(label)}</option>`).join('')}
+              </select>
+              <span class="meta">Pilih level severity alert yang akan ditarik dari Wazuh Indexer.</span>
+            </div>
             <div class="field">
               <label for="realtime-mode">Mode pull</label>
               <select class="select" id="realtime-mode" name="realtime_mode">
@@ -198,8 +228,8 @@ export async function mount(ctx) {
           <div class="form-grid">
             <div class="field">
               <label for="ai-base-url">Base URL Ollama</label>
-              <input class="input mono" id="ai-base-url" name="ai_base_url" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:11434" value="${esc(ai.base_url)}">
-              <span class="meta">Hanya loopback (localhost / 127.0.0.1 / ::1). Host eksternal ditolak.</span>
+              <input class="input mono" id="ai-base-url" name="ai_base_url" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="http://127.0.0.1:11434 atau http://192.168.x.x:11434" value="${esc(ai.base_url)}">
+              <span class="meta">Mendukung loopback (localhost / 127.0.0.1 / ::1) dan IP jaringan lokal / LAN (192.168.x.x / 10.x.x.x / 172.16–31.x.x). Path <span class="mono">/api/generate</span> dibersihkan otomatis.</span>
             </div>
             <div class="field">
               <label for="ai-model">Model</label>
@@ -237,7 +267,79 @@ export async function mount(ctx) {
           <span class="meta">${esc(wazuhSummary(data))}</span>
           <button class="button primary" type="submit">${icon('check')} Simpan pengaturan</button>
         </div>
-      </form>`;
+      </form>
+
+      <section class="form-section" id="user-management-section" style="margin-top:var(--space-5)">
+        <div class="split">
+          <div>
+            <h2 class="section-heading">Manajemen Pengguna (Khusus Admin)</h2>
+            <p class="meta">Kelola akun login Arbiter. Peran <strong>Admin</strong> memiliki akses penuh termasuk Pengaturan &amp; Database. Peran <strong>Analis</strong> dapat mengakses Triage, Statistik, Insiden, Impor, Laporan, Realtime, AI Triage, dan Rumus Query Wazuh.</p>
+          </div>
+          <span class="badge neutral">${users.length} akun</span>
+        </div>
+
+        <div class="stack" id="user-list" style="margin-top:var(--space-3)">
+          ${users.map(u => `
+            <div class="split" style="padding:var(--space-3);border:1px solid var(--border-subtle);border-radius:var(--radius-sm);align-items:center;gap:var(--space-3);flex-wrap:wrap" data-user-row="${esc(u.username)}">
+              <div>
+                <strong>${esc(u.display_name || u.username)}</strong>
+                <span class="mono meta" style="margin-left:var(--space-2)">@${esc(u.username)}</span>
+                <span class="badge ${u.role === 'admin' ? 'warning' : 'neutral'}" style="margin-left:var(--space-2)">${u.role === 'admin' ? 'Admin' : 'Analis'}</span>
+              </div>
+              <div style="display:flex;gap:var(--space-2);align-items:center;flex-wrap:wrap">
+                <select class="select" data-user-role="${esc(u.username)}" aria-label="Role untuk ${esc(u.username)}" style="width:auto">
+                  <option value="analyst" ${u.role === 'analyst' ? 'selected' : ''}>Analis</option>
+                  <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
+                </select>
+                <input class="input" type="password" data-user-password="${esc(u.username)}" placeholder="Password baru (opsional)" autocomplete="new-password" style="width:190px">
+                <button class="button" type="button" data-action="update-user" data-username="${esc(u.username)}">Perbarui</button>
+                <button class="button" type="button" data-action="delete-user" data-username="${esc(u.username)}">Hapus</button>
+              </div>
+            </div>
+          `).join('') || '<p class="meta">Memuat daftar akun…</p>'}
+        </div>
+
+        <form id="user-create-form" class="stack" style="margin-top:var(--space-4);padding-top:var(--space-3);border-top:1px solid var(--border-subtle)" novalidate>
+          <h3 class="section-heading" style="font-size:0.95rem">Tambah akun baru</h3>
+          <div class="form-grid">
+            <div class="field">
+              <label for="new-user-username">Username</label>
+              <input class="input mono" id="new-user-username" name="username" type="text" autocomplete="off" spellcheck="false" placeholder="analis1" required>
+            </div>
+            <div class="field">
+              <label for="new-user-display">Nama tampilan</label>
+              <input class="input" id="new-user-display" name="display_name" type="text" autocomplete="off" placeholder="Analis SOC 1">
+            </div>
+            <div class="field">
+              <label for="new-user-role">Role</label>
+              <select class="select" id="new-user-role" name="role">
+                <option value="analyst" selected>Analis (tanpa Pengaturan &amp; Database)</option>
+                <option value="admin">Admin (akses penuh)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="new-user-password">Password awal</label>
+              <input class="input" id="new-user-password" name="password" type="password" autocomplete="new-password" placeholder="Minimal 6 karakter" required>
+            </div>
+          </div>
+          <div class="settings-actions">
+            <button class="button" type="submit">${icon('check')} Tambah pengguna</button>
+            <span class="inline-status" id="user-mgmt-status" role="status"></span>
+          </div>
+        </form>
+      </section>`;
+  }
+
+  async function loadUsers() {
+    try {
+      const res = await json('/api/auth/users', {signal, timeout: 10000});
+      if (Array.isArray(res?.users)) {
+        users = res.users;
+        if (settings) render();
+      }
+    } catch {
+      /* Ignore if user endpoint not reachable in minimal mock */
+    }
   }
 
   async function load() {
@@ -246,6 +348,7 @@ export async function mount(ctx) {
       settings = normalizeSettings(body.settings);
       setDirty(false);
       render();
+      loadUsers();
     } catch (error) {
       if (error.name === 'AbortError') return;
       root.innerHTML = `<header class="page-header"><div class="page-heading"><h1>Pengaturan</h1></div></header>${errorState('Pengaturan belum dapat dimuat dari workspace lokal.')}`;
@@ -253,8 +356,11 @@ export async function mount(ctx) {
     }
   }
 
-  root.addEventListener('input', () => setDirty(true), {signal});
+  root.addEventListener('input', event => {
+    if (event.target.closest('#settings-form')) setDirty(true);
+  }, {signal});
   root.addEventListener('change', event => {
+    if (!event.target.closest('#settings-form')) return;
     setDirty(true);
     if (event.target.name === 'realtime_mode') {
       const interval = root.querySelector('#realtime-interval');
@@ -271,10 +377,68 @@ export async function mount(ctx) {
     if (connectionButton) { await testConnection(connectionButton); return; }
     const modelButton = event.target.closest('[data-action=test-model]');
     if (modelButton) { await testModel(modelButton); return; }
+    const updateBtn = event.target.closest('[data-action=update-user]');
+    if (updateBtn) {
+      const uname = updateBtn.dataset.username;
+      const roleEl = root.querySelector(`[data-user-role="${CSS.escape(uname)}"]`);
+      const passEl = root.querySelector(`[data-user-password="${CSS.escape(uname)}"]`);
+      const payload = {role: roleEl?.value || 'analyst'};
+      if (passEl?.value) payload.password = passEl.value;
+      updateBtn.disabled = true;
+      try {
+        await json(`/api/auth/users/${encodeURIComponent(uname)}`, {
+          method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload), signal,
+        });
+        notify(`Akun @${uname} diperbarui.`, 'success');
+        await loadUsers();
+      } catch (err) {
+        notify(err.message || 'Gagal memperbarui pengguna.', 'error');
+      } finally {
+        if (updateBtn.isConnected) updateBtn.disabled = false;
+      }
+      return;
+    }
+    const deleteBtn = event.target.closest('[data-action=delete-user]');
+    if (deleteBtn) {
+      const uname = deleteBtn.dataset.username;
+      if (!confirm(`Hapus akun @${uname}?`)) return;
+      deleteBtn.disabled = true;
+      try {
+        await json(`/api/auth/users/${encodeURIComponent(uname)}`, {method: 'DELETE', signal});
+        notify(`Akun @${uname} dihapus.`, 'info');
+        await loadUsers();
+      } catch (err) {
+        notify(err.message || 'Gagal menghapus pengguna.', 'error');
+      } finally {
+        if (deleteBtn.isConnected) deleteBtn.disabled = false;
+      }
+    }
   }, {signal});
 
   root.addEventListener('submit', async event => {
     event.preventDefault();
+    if (event.target.id === 'user-create-form') {
+      const form = event.target;
+      const statusSlot = root.querySelector('#user-mgmt-status');
+      const payload = {
+        username: form.elements.username.value.trim(),
+        display_name: form.elements.display_name.value.trim(),
+        role: form.elements.role.value,
+        password: form.elements.password.value,
+      };
+      try {
+        await json('/api/auth/users', {
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload), signal,
+        });
+        form.reset();
+        notify(`Pengguna @${payload.username} berhasil ditambahkan.`, 'success');
+        await loadUsers();
+      } catch (err) {
+        if (statusSlot) { statusSlot.textContent = err.message; statusSlot.dataset.kind = 'error'; }
+        else notify(err.message, 'error');
+      }
+      return;
+    }
     const draft = collect();
     if (!draft) return;
     if (draft.wazuh.indexer_url && !/^https?:\/\//i.test(draft.wazuh.indexer_url)) { renderStatus('URL harus diawali http:// atau https://.', 'error'); return; }

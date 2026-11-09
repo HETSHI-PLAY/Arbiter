@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import ipaddress
 import json
 import re
 import ssl
@@ -37,6 +38,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "mode": "interval",
         "last_pull_at": "",
         "max_alerts": 500,
+        "min_rule_level": 7,
+        "max_rule_level": None,
     },
     "ai": {
         "enabled": False,
@@ -52,6 +55,40 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 _SIDEBAR_VALUES = {"expanded", "collapsed"}
 _INDEX_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._*,-]*$")
 _URL = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
+_OLLAMA_PATH_SUFFIX_RE = re.compile(
+    r"/(?:api(?:/(?:generate|chat|tags|pull|show|embeddings|embed|version))?|v1(?:/chat/completions|/completions|/models)?)/?$",
+    re.IGNORECASE,
+)
+_LOCAL_HOST_SUFFIXES = (".local", ".lan", ".internal", ".home", ".lab", ".corp", ".intranet", ".localdomain")
+
+
+def normalize_ollama_base_url(value: Any) -> str:
+    """Normalize an Ollama base URL (stripping /api/generate etc.) and verify it is loopback or private LAN."""
+    raw = str(value or "").strip() or "http://127.0.0.1:11434"
+    cleaned = raw.rstrip("/")
+    cleaned = _OLLAMA_PATH_SUFFIX_RE.sub("", cleaned).rstrip("/")
+    parsed = urllib.parse.urlparse(cleaned)
+    host = (parsed.hostname or "").strip().lower()
+    if parsed.scheme not in {"http", "https"} or not host:
+        raise ValueError("AI lokal hanya boleh memakai http://localhost, IP loopback, atau IP jaringan lokal (LAN).")
+
+    allowed = False
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        allowed = True
+    else:
+        try:
+            ip = ipaddress.ip_address(host)
+            cgnat = ipaddress.ip_network("100.64.0.0/10")
+            if ip.is_loopback or ip.is_private or ip.is_link_local or (isinstance(ip, ipaddress.IPv4Address) and ip in cgnat):
+                allowed = True
+        except ValueError:
+            # Hostname: allow single-label internal hostnames (e.g. Docker service `ollama`) or local LAN suffixes
+            if "." not in host or host.endswith(_LOCAL_HOST_SUFFIXES):
+                allowed = True
+
+    if not allowed:
+        raise ValueError("AI lokal hanya boleh memakai http://localhost, IP loopback, atau IP jaringan lokal (LAN).")
+    return cleaned
 
 
 def default_settings() -> dict[str, Any]:
@@ -143,15 +180,41 @@ def validate_settings(payload: dict[str, Any], current: dict[str, Any] | None = 
         raise ValueError("realtime.max_alerts harus antara 1 dan 5000.")
     realtime["max_alerts"] = max_alerts
 
+    raw_min_level = realtime.get("min_rule_level", MIN_RULE_LEVEL)
+    try:
+        min_rule_level = int(MIN_RULE_LEVEL if raw_min_level is None or raw_min_level == "" else raw_min_level)
+    except (TypeError, ValueError):
+        raise ValueError("realtime.min_rule_level harus berupa angka.") from None
+    if not 0 <= min_rule_level <= 16:
+        raise ValueError("realtime.min_rule_level harus antara 0 dan 16.")
+    realtime["min_rule_level"] = min_rule_level
+
+    raw_max_level = realtime.get("max_rule_level")
+    if raw_max_level is None or str(raw_max_level).strip() == "":
+        max_rule_level: int | None = None
+    else:
+        try:
+            max_rule_level = int(raw_max_level)
+        except (TypeError, ValueError):
+            raise ValueError("realtime.max_rule_level harus berupa angka.") from None
+        if not 0 <= max_rule_level <= 16 or max_rule_level < min_rule_level:
+            raise ValueError("realtime.max_rule_level tidak valid.")
+    realtime["max_rule_level"] = max_rule_level
+
+    prev_rt = (current or {}).get("realtime") if isinstance(current, dict) else None
+    rt_payload = payload.get("realtime") if isinstance(payload.get("realtime"), dict) else {}
+    if isinstance(prev_rt, dict) and "last_pull_at" not in rt_payload:
+        prev_min = prev_rt.get("min_rule_level", MIN_RULE_LEVEL)
+        prev_max = prev_rt.get("max_rule_level", None)
+        if (min_rule_level, max_rule_level) != (prev_min, prev_max):
+            realtime["last_pull_at"] = ""
+
     ai = settings.get("ai")
     if not isinstance(ai, dict):
         raise ValueError("Bagian ai tidak valid.")
     ai["enabled"] = _boolean(ai.get("enabled", False), "ai.enabled")
     base_url = _text(ai.get("base_url"), "ai.base_url", 300) or "http://127.0.0.1:11434"
-    parsed = urllib.parse.urlparse(base_url)
-    if parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise ValueError("AI lokal hanya boleh memakai http://localhost atau IP loopback.")
-    ai["base_url"] = base_url.rstrip("/")
+    ai["base_url"] = normalize_ollama_base_url(base_url)
     ai["model"] = _text(ai.get("model"), "ai.model", 200) or DEFAULT_SETTINGS["ai"]["model"]
     try:
         ai_timeout = int(ai.get("timeout_seconds", 90))
@@ -276,12 +339,15 @@ def wazuh_password(settings: dict[str, Any]) -> str:
         return ""
 
 
-def wazuh_alert_query(min_rule_level: int = MIN_RULE_LEVEL) -> dict[str, Any]:
-    """Scope used for every Wazuh Indexer read: Medium severity and above.
-
-    Wazuh maps ``rule.level`` 7-9 to Medium, 10-11 to High, 12-15 to Critical.
-    """
-    return {"query": {"range": {"rule.level": {"gte": int(min_rule_level)}}}}
+def wazuh_alert_query(
+    min_rule_level: int = MIN_RULE_LEVEL,
+    max_rule_level: int | None = None,
+) -> dict[str, Any]:
+    """Scope used for Wazuh Indexer read/count with configurable severity range."""
+    level_range: dict[str, int] = {"gte": int(min_rule_level)}
+    if max_rule_level is not None:
+        level_range["lte"] = int(max_rule_level)
+    return {"query": {"range": {"rule.level": level_range}}}
 
 
 def _normalize_wazuh_timestamp(value: str) -> str:
@@ -316,6 +382,8 @@ def test_wazuh_connection(
     password: str,
     index_pattern: str,
     verify_tls: bool,
+    min_rule_level: int = MIN_RULE_LEVEL,
+    max_rule_level: int | None = None,
     timeout: float = 5.0,
 ) -> dict[str, Any]:
     """Probe the Wazuh Indexer with a single scoped count request."""
@@ -326,7 +394,7 @@ def test_wazuh_connection(
     if not _INDEX_PATTERN.match(pattern):
         raise ValueError("Pola indeks tidak valid.")
     target = f"{base}/{urllib.parse.quote(pattern, safe='*-._,')}/_count"
-    body = json.dumps(wazuh_alert_query()).encode("utf-8")
+    body = json.dumps(wazuh_alert_query(min_rule_level=min_rule_level, max_rule_level=max_rule_level)).encode("utf-8")
     request = urllib.request.Request(
         target,
         data=body,
@@ -377,7 +445,8 @@ def test_wazuh_connection(
         "status": status,
         "count": int(count) if isinstance(count, (int, float)) else None,
         "index_pattern": pattern,
-        "min_rule_level": MIN_RULE_LEVEL,
+        "min_rule_level": int(min_rule_level),
+        "max_rule_level": int(max_rule_level) if max_rule_level is not None else None,
     }
 
 
@@ -450,9 +519,11 @@ def wazuh_search(
     verify_tls: bool,
     size: int = 500,
     since: str = "",
+    min_rule_level: int = MIN_RULE_LEVEL,
+    max_rule_level: int | None = None,
     timeout: float = 10.0,
 ) -> list[dict[str, Any]]:
-    """Pull Medium+ alert documents from the Wazuh Indexer (never count-only).
+    """Pull alert documents from the Wazuh Indexer within the configured severity range.
 
     Returns a list of raw ``_source`` documents (newest first). ``since`` is an
     optional ISO timestamp lower bound on the alert ``timestamp`` field so that
@@ -467,7 +538,10 @@ def wazuh_search(
     if not 1 <= int(size) <= 5000:
         raise ValueError("Ukuran pencarian Wazuh harus antara 1 dan 5000.")
 
-    range_query: dict[str, Any] = {"rule.level": {"gte": int(MIN_RULE_LEVEL)}}
+    level_range: dict[str, int] = {"gte": int(min_rule_level)}
+    if max_rule_level is not None:
+        level_range["lte"] = int(max_rule_level)
+    range_query: dict[str, Any] = {"rule.level": level_range}
     if since and str(since).strip():
         ts = _normalize_wazuh_timestamp(str(since))
         if _valid_timestamp(ts):

@@ -210,16 +210,17 @@ class LocalAIUnavailable(RuntimeError):
 
 
 def ollama_request(prompt: str, model: str, base_url: str, timeout: float = 12) -> str:
-    """Invokes ONLY a loopback Ollama endpoint; remote/cloud hosts are strictly refused."""
-    from urllib.parse import urlparse
+    """Invokes a loopback or private LAN Ollama endpoint; external cloud hosts are strictly refused."""
     from urllib.request import Request, urlopen
+    from app.settings import normalize_ollama_base_url
 
-    parsed = urlparse(base_url)
-    if parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise LocalAIUnavailable("Local AI endpoint must use http://localhost or a loopback IP; cloud hosts are refused.")
+    try:
+        normalized_base = normalize_ollama_base_url(base_url)
+    except ValueError as exc:
+        raise LocalAIUnavailable(str(exc)) from exc
     body = json.dumps({"model": model, "prompt": prompt, "stream": False, "format": "json"}).encode("utf-8")
     request = Request(
-        base_url.rstrip("/") + "/api/generate",
+        normalized_base.rstrip("/") + "/api/generate",
         data=body,
         headers={"Content-Type": "application/json"},
         method="POST",

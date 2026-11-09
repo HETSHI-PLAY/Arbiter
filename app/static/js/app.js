@@ -18,7 +18,9 @@ const selection=createSelection(routeScope(new URLSearchParams(location.hash.spl
 let currentRoute, controller, cleanup, guard=null, notifyTimer, healthPending=false, lastHealth=null, routeVersion=0;
 const scrollPositions=new Map();
 let navigationMemory=createNavigationMemory();
-const pageTitles={triage:'Triage',stats:'Statistik',incidents:'Insiden',imports:'Impor',reports:'Laporan',realtime:'Realtime', 'ai-triage':'AI Triage',database:'Database',settings:'Pengaturan'};
+const pageTitles={triage:'Triage',stats:'Statistik',incidents:'Insiden',imports:'Impor',reports:'Laporan',realtime:'Realtime','ai-triage':'AI Triage','wazuh-queries':'Rumus Query Wazuh',database:'Database',settings:'Pengaturan'};
+const adminOnlyPages=new Set(['database','settings']);
+let currentUser=null, authChecked=false;
 for(const el of document.querySelectorAll('[data-icon]'))el.innerHTML=icon(el.dataset.icon);
 document.querySelector('#open-navigation').innerHTML=icon('menu');
 document.querySelector('#toggle-sidebar').innerHTML=icon('menu');
@@ -41,7 +43,87 @@ function canLeave(next){
   selection.setScope(nextScope.key,true);return true;
 }
 const router=createRouter(render,canLeave);
+function applyUserPermissions(){
+  const isAdmin=!currentUser||currentUser.role==='admin';
+  for(const link of document.querySelectorAll('.nav-link')){
+    if(adminOnlyPages.has(link.dataset.page)){
+      link.style.display=isAdmin?'':'none';
+    }
+  }
+  const slot=document.querySelector('#user-session-slot');
+  if(!slot)return;
+  if(!currentUser){slot.innerHTML='';return;}
+  const roleLabel=currentUser.role==='admin'?'Admin':'Analis';
+  slot.innerHTML=`<span class="badge ${currentUser.role==='admin'?'warning':'neutral'}" title="Masuk sebagai ${esc(currentUser.display_name||currentUser.username)} (${roleLabel})">${esc(currentUser.username)} · ${roleLabel}</span><button class="button" type="button" id="logout-button" aria-label="Keluar sesi">Keluar</button>`;
+  slot.querySelector('#logout-button')?.addEventListener('click',async()=>{
+    try{await json('/api/auth/logout',{method:'POST'});}catch{/* ignore */}
+    currentUser=null;
+    renderLoginGate();
+  });
+}
+function renderLoginGate(){
+  controller?.abort();if(typeof cleanup==='function')cleanup();cleanup=null;guard=null;
+  document.querySelector('#sidebar')?.setAttribute('hidden','');
+  document.querySelector('.utility-bar')?.setAttribute('hidden','');
+  document.title='Login — Arbiter';
+  main.innerHTML=`
+    <div style="max-width:420px;margin:10vh auto;padding:var(--space-5);border:1px solid var(--border-subtle);border-radius:var(--radius-md);background:var(--surface-raised, var(--bg-elevated, transparent))">
+      <div style="display:flex;align-items:center;gap:var(--space-2);margin-bottom:var(--space-2)">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m4 19 8-15 8 15M7 14h10M12 4v17M7 21h10"/></svg>
+        <h1 style="font-size:1.35rem;margin:0">Arbiter</h1>
+      </div>
+      <p class="meta" style="margin-bottom:var(--space-4)">Investigation Desk — Masuk untuk mengakses workspace SOC.</p>
+      <form id="login-form" class="stack" novalidate>
+        <div class="field">
+          <label for="login-username">Username</label>
+          <input class="input mono" id="login-username" name="username" type="text" autocomplete="username" spellcheck="false" required autofocus>
+        </div>
+        <div class="field">
+          <label for="login-password">Password</label>
+          <input class="input" id="login-password" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <p class="inline-status" id="login-error" data-kind="error" role="alert" style="margin:0;min-height:1.25rem"></p>
+        <button class="button primary" type="submit" style="width:100%;justify-content:center">${icon('shield')} Masuk ke Workspace</button>
+      </form>
+    </div>`;
+  const form=main.querySelector('#login-form');
+  form?.addEventListener('submit',async e=>{
+    e.preventDefault();
+    const errEl=main.querySelector('#login-error');
+    const submitBtn=form.querySelector('button[type=submit]');
+    const username=form.elements.username.value.trim();
+    const password=form.elements.password.value;
+    if(!username||!password){if(errEl)errEl.textContent='Isi username dan password.';return;}
+    submitBtn.disabled=true;
+    if(errEl)errEl.textContent='';
+    try{
+      const res=await json('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
+      currentUser=res.user;
+      document.querySelector('#sidebar')?.removeAttribute('hidden');
+      document.querySelector('.utility-bar')?.removeAttribute('hidden');
+      applyUserPermissions();
+      health();tenants();loadWorkspaceSettings();
+      if(currentRoute)render(currentRoute);else router.start();
+    }catch(err){
+      if(errEl)errEl.textContent=err.message||'Username atau password salah.';
+    }finally{
+      if(submitBtn.isConnected)submitBtn.disabled=false;
+    }
+  });
+}
 async function render(route){
+  if(!authChecked){
+    authChecked=true;
+    try{
+      const me=await json('/api/auth/me',{timeout:10000});
+      if(me&&me.authenticated===false){currentUser=null;currentRoute=route;renderLoginGate();return;}
+      currentUser=me?.user||{username:'admin',display_name:'Administrator',role:'admin'};
+    }catch{
+      currentUser={username:'admin',display_name:'Administrator',role:'admin'};
+    }
+    applyUserPermissions();
+  }
+  if(authChecked&&!currentUser){currentRoute=route;renderLoginGate();return;}
   const version=++routeVersion;
   const oldSearch=main.querySelector('#triage-search');
   const restoreSearch=oldSearch===document.activeElement?{start:oldSearch.selectionStart,end:oldSearch.selectionEnd}:null;
@@ -62,6 +144,9 @@ async function render(route){
   main.innerHTML=loadingRows();
   if(route.page==='not-found'){
     main.innerHTML=`<div class="page-header"><h1>Halaman tidak ditemukan</h1></div>${emptyState('Tujuan ini tidak tersedia','Kembali ke antrean untuk melanjutkan pekerjaan.',`<a class="button primary" href="${withParams('/triage',scopeParams(scope))}">Buka Triage</a>`)}`;return;
+  }
+  if(currentUser&&currentUser.role!=='admin'&&adminOnlyPages.has(route.page)){
+    main.innerHTML=`<div class="page-header"><h1>${esc(pageTitles[route.page])}</h1></div>${emptyState('Akses dibatasi untuk Admin','Halaman Pengaturan dan Database hanya dapat diakses oleh akun dengan role Admin. Gunakan menu Rumus Query Wazuh atau Triage untuk operasional analis.',`<a class="button primary" href="${withParams('/triage',scopeParams(scope))}">Buka Triage</a>`)}`;return;
   }
   try{
     const feature=await import(`./features/${route.page}/view.js`);

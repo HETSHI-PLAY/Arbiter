@@ -12,10 +12,22 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi import Body, Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.auth import (
+    SESSION_COOKIE_NAME,
+    SESSION_TTL_SECONDS,
+    authenticate_user,
+    create_session_token,
+    create_user,
+    delete_user,
+    get_user,
+    list_users,
+    update_user,
+    verify_session_token,
+)
 from app.config import HOST, PORT
 from app.ai_triage import (
     AI_TRIAGE_STATE_KEY,
@@ -74,10 +86,61 @@ app = FastAPI(
 )
 
 
+def _extract_request_user(request: Request) -> dict[str, Any] | None:
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
+        auth_header = request.headers.get("authorization") or ""
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
+        else:
+            token = request.headers.get("x-arbiter-token")
+    claims = verify_session_token(token)
+    if not claims:
+        return None
+    try:
+        with get_db() as conn:
+            user = get_user(conn, claims["username"])
+            return user
+    except Exception:
+        return claims
+
+
+_PUBLIC_API_PATHS = {"/api/auth/login", "/api/auth/logout", "/api/auth/me", "/api/health"}
+
+
 @app.middleware("http")
-async def no_cache_static_assets(request, call_next):
+async def no_cache_and_auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and path not in _PUBLIC_API_PATHS:
+        enforce_auth = (
+            PORT != 0
+            or request.headers.get("x-arbiter-auth-enforce") == "1"
+            or SESSION_COOKIE_NAME in request.cookies
+            or "authorization" in request.headers
+            or "x-arbiter-token" in request.headers
+            or path.startswith("/api/auth/users")
+        )
+        if enforce_auth:
+            user = _extract_request_user(request)
+            if not user:
+                return JSONResponse(
+                    {"detail": "Sesi login diperlukan. Silakan login terlebih dahulu."},
+                    status_code=401,
+                )
+            request.state.user = user
+            is_admin_only = (
+                path.startswith("/api/auth/users")
+                or path.startswith("/api/database")
+                or (path.startswith("/api/settings") and request.method != "GET")
+            )
+            if is_admin_only and user.get("role") != "admin":
+                return JSONResponse(
+                    {"detail": "Akses ditolak. Fitur ini hanya dapat diakses oleh Admin."},
+                    status_code=403,
+                )
+
     response = await call_next(request)
-    if request.url.path == "/" or request.url.path.startswith(("/static/js/", "/static/styles/")):
+    if path == "/" or path.startswith(("/static/js/", "/static/styles/")):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     return response
 
@@ -1127,12 +1190,16 @@ def get_suggestions(
 
 @app.get("/api/realtime/count")
 def api_realtime_count():
-    """Count Medium+ Wazuh alerts without downloading or storing any alert."""
+    """Count Wazuh alerts in the configured severity range without downloading or storing any alert."""
     with get_db() as conn:
         stored = load_settings(conn)
     wazuh = stored.get("wazuh", {})
+    realtime = stored.get("realtime", {})
     if not wazuh.get("indexer_url"):
         raise HTTPException(status_code=400, detail="Wazuh Indexer belum dikonfigurasi di halaman Pengaturan.")
+    min_level = int(realtime.get("min_rule_level") if realtime.get("min_rule_level") is not None else 7)
+    raw_max = realtime.get("max_rule_level")
+    max_level = int(raw_max) if raw_max is not None and str(raw_max).strip() != "" else None
     try:
         result = test_wazuh_connection(
             indexer_url=wazuh.get("indexer_url", ""),
@@ -1140,6 +1207,8 @@ def api_realtime_count():
             password=wazuh_password(stored),
             index_pattern=wazuh.get("index_pattern", "wazuh-alerts-*"),
             verify_tls=bool(wazuh.get("verify_tls", True)),
+            min_rule_level=min_level,
+            max_rule_level=max_level,
         )
     except ValueError as error:
         raise HTTPException(status_code=502, detail=str(error)) from None
@@ -1147,8 +1216,8 @@ def api_realtime_count():
 
 
 @app.post("/api/realtime/pull")
-def api_realtime_pull():
-    """Pull Medium+ alerts from the Wazuh Indexer and ingest them into the active DB.
+def api_realtime_pull(payload: dict[str, Any] | None = Body(default=None)):
+    """Pull alerts in the configured severity range from the Wazuh Indexer and ingest them into the active DB.
 
     Interval mode pulls on demand; daily mode only pulls once every 24 hours
     (enforced server-side via ``realtime.last_pull_at``). Never downloads more
@@ -1162,8 +1231,39 @@ def api_realtime_pull():
     if not wazuh.get("indexer_url"):
         raise HTTPException(status_code=400, detail="Wazuh Indexer belum dikonfigurasi di halaman Pengaturan.")
 
+    stored_min = int(realtime.get("min_rule_level") if realtime.get("min_rule_level") is not None else 7)
+    raw_stored_max = realtime.get("max_rule_level")
+    stored_max = int(raw_stored_max) if raw_stored_max is not None and str(raw_stored_max).strip() != "" else None
+
+    min_rule_level = stored_min
+    max_rule_level = stored_max
+    severity_overridden = False
+    if isinstance(payload, dict):
+        if "min_rule_level" in payload and payload["min_rule_level"] is not None and str(payload["min_rule_level"]).strip() != "":
+            try:
+                min_rule_level = int(payload["min_rule_level"])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="min_rule_level harus berupa angka.") from None
+            if not 0 <= min_rule_level <= 16:
+                raise HTTPException(status_code=400, detail="min_rule_level harus antara 0 dan 16.")
+            severity_overridden = True
+        if "max_rule_level" in payload:
+            raw_max = payload.get("max_rule_level")
+            if raw_max is None or str(raw_max).strip() == "":
+                max_rule_level = None
+            else:
+                try:
+                    max_rule_level = int(raw_max)
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail="max_rule_level harus berupa angka.") from None
+                if not 0 <= max_rule_level <= 16 or max_rule_level < min_rule_level:
+                    raise HTTPException(status_code=400, detail="max_rule_level tidak valid.")
+            severity_overridden = True
+
+    severity_changed = severity_overridden and (min_rule_level, max_rule_level) != (stored_min, stored_max)
+
     mode = str(realtime.get("mode") or "interval")
-    last_pull_at = str(realtime.get("last_pull_at") or "").strip()
+    last_pull_at = "" if severity_changed else str(realtime.get("last_pull_at") or "").strip()
     if mode == "daily" and last_pull_at:
         try:
             last = datetime.fromisoformat(last_pull_at.replace("Z", "+00:00"))
@@ -1190,6 +1290,8 @@ def api_realtime_pull():
             verify_tls=bool(wazuh.get("verify_tls", True)),
             size=int(realtime.get("max_alerts") or 500),
             since=last_pull_at,
+            min_rule_level=min_rule_level,
+            max_rule_level=max_rule_level,
         )
     except ValueError as error:
         raise HTTPException(status_code=502, detail=str(error)) from None
@@ -1204,8 +1306,10 @@ def api_realtime_pull():
                 inserted += 1
             elif did_dedup:
                 deduplicated += 1
-        # Persist the pull timestamp so daily gating and the next `since` window work.
+        # Persist the pull timestamp and any updated severity selection.
         stored["realtime"]["last_pull_at"] = now.isoformat()
+        stored["realtime"]["min_rule_level"] = min_rule_level
+        stored["realtime"]["max_rule_level"] = max_rule_level
         save_settings(conn, stored)
 
     return {
@@ -1214,7 +1318,8 @@ def api_realtime_pull():
         "searched": len(docs),
         "inserted": inserted,
         "deduplicated": deduplicated,
-        "min_rule_level": 7,
+        "min_rule_level": min_rule_level,
+        "max_rule_level": max_rule_level,
         "index_pattern": wazuh.get("index_pattern", "wazuh-alerts-*"),
     }
 
@@ -1886,6 +1991,21 @@ def api_test_wazuh(payload: dict[str, Any]):
     verify_tls = payload.get("verify_tls", wazuh.get("verify_tls", True))
     if not isinstance(verify_tls, bool):
         raise HTTPException(status_code=400, detail="verify_tls harus berupa boolean (true/false).")
+    realtime = stored.get("realtime", {})
+    raw_min = payload.get("min_rule_level", realtime.get("min_rule_level", 7))
+    try:
+        min_level = max(0, min(16, int(7 if raw_min is None or raw_min == "" else raw_min)))
+    except (TypeError, ValueError):
+        min_level = 7
+    raw_max = payload.get("max_rule_level", realtime.get("max_rule_level"))
+    try:
+        max_level = int(raw_max) if raw_max is not None and str(raw_max).strip() != "" else None
+    except (TypeError, ValueError):
+        max_level = None
+    extra_kwargs: dict[str, Any] = {}
+    if min_level != 7 or max_level is not None:
+        extra_kwargs["min_rule_level"] = min_level
+        extra_kwargs["max_rule_level"] = max_level
     try:
         return test_wazuh_connection(
             indexer_url=url,
@@ -1893,6 +2013,7 @@ def api_test_wazuh(payload: dict[str, Any]):
             password=str(password or ""),
             index_pattern=pattern,
             verify_tls=verify_tls,
+            **extra_kwargs,
         )
     except ValueError as error:
         raise HTTPException(status_code=502, detail=str(error)) from None
@@ -2054,3 +2175,177 @@ def api_database_purge_incidents(payload: dict[str, Any]):
 def index_page():
     html_path = Path(__file__).with_name("index.html")
     return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+
+
+# ── Authentication, User Management & Shared Wazuh Query Formulas ──
+
+WAZUH_QUERIES_STATE_KEY = "wazuh_query_formulas"
+
+
+def _require_admin_user(request: Request, conn) -> dict[str, Any]:
+    user = getattr(request.state, "user", None) or _extract_request_user(request)
+    if not user:
+        if PORT == 0 and request.headers.get("x-arbiter-auth-enforce") != "1":
+            users = list_users(conn)
+            return next((u for u in users if u["role"] == "admin"), {"username": "admin", "role": "admin", "display_name": "Administrator"})
+        raise HTTPException(status_code=401, detail="Sesi login diperlukan. Silakan login terlebih dahulu.")
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Akses ditolak. Fitur ini hanya dapat diakses oleh Admin.")
+    return user
+
+
+@app.get("/api/auth/me")
+def api_auth_me(request: Request):
+    with get_db() as conn:
+        list_users(conn)  # Ensure initial admin seed exists
+    user = _extract_request_user(request)
+    if not user:
+        return {"authenticated": False, "user": None}
+    return {"authenticated": True, "user": user}
+
+
+@app.post("/api/auth/login")
+def api_auth_login(payload: dict[str, Any], response: Response):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload login tidak valid.")
+    username = str(payload.get("username") or "").strip()
+    password = str(payload.get("password") or "")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username dan password wajib diisi.")
+    with get_db() as conn:
+        user = authenticate_user(conn, username, password)
+    if not user:
+        raise HTTPException(status_code=401, detail="Username atau password salah.")
+    token = create_session_token(user)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    return {"ok": True, "user": user, "token": token}
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout(response: Response):
+    response.delete_cookie(key=SESSION_COOKIE_NAME, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/auth/users")
+def api_list_users(request: Request):
+    with get_db() as conn:
+        _require_admin_user(request, conn)
+        return {"users": list_users(conn)}
+
+
+@app.post("/api/auth/users")
+def api_create_user(payload: dict[str, Any], request: Request):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload pengguna tidak valid.")
+    with get_db() as conn:
+        _require_admin_user(request, conn)
+        try:
+            created = create_user(
+                conn,
+                username=str(payload.get("username") or ""),
+                password=str(payload.get("password") or ""),
+                role=str(payload.get("role") or "analyst"),
+                display_name=str(payload.get("display_name") or ""),
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+        return {"user": created, "users": list_users(conn)}
+
+
+@app.put("/api/auth/users/{username}")
+def api_update_user(username: str, payload: dict[str, Any], request: Request):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload pembaruan pengguna tidak valid.")
+    with get_db() as conn:
+        _require_admin_user(request, conn)
+        try:
+            updated = update_user(
+                conn,
+                username,
+                password=payload.get("password"),
+                role=payload.get("role"),
+                display_name=payload.get("display_name"),
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+        return {"user": updated, "users": list_users(conn)}
+
+
+@app.delete("/api/auth/users/{username}")
+def api_delete_user(username: str, request: Request):
+    with get_db() as conn:
+        actor = _require_admin_user(request, conn)
+        try:
+            delete_user(conn, username, actor_username=str(actor.get("username") or ""))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+        return {"deleted": username, "users": list_users(conn)}
+
+
+@app.get("/api/wazuh-queries")
+def api_list_wazuh_queries():
+    with get_db() as conn:
+        doc = load_document(conn, WAZUH_QUERIES_STATE_KEY, None)
+    items = doc.get("items") if isinstance(doc, dict) and isinstance(doc.get("items"), list) else []
+    return {"items": items, "queries": items}
+
+
+@app.post("/api/wazuh-queries")
+def api_save_wazuh_query(payload: dict[str, Any], request: Request):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Payload rumus query tidak valid.")
+    title = str(payload.get("title") or "").strip()[:160]
+    category = str(payload.get("category") or "Kustom").strip()[:80] or "Kustom"
+    dql = str(payload.get("dql") or "").strip()[:4000]
+    dsl = str(payload.get("dsl") or "").strip()[:8000]
+    lucene = str(payload.get("lucene") or "").strip()[:4000]
+    description = str(payload.get("description") or "").strip()[:600]
+    if not title:
+        raise HTTPException(status_code=400, detail="Judul rumus query wajib diisi.")
+    if not (dql or dsl or lucene):
+        raise HTTPException(status_code=400, detail="Minimal satu rumus query (DQL/KQL, OpenSearch JSON, atau Lucene) wajib diisi.")
+
+    user = _extract_request_user(request)
+    author = str(user.get("username") if user else payload.get("author") or "analyst")
+    item = {
+        "id": str(uuid.uuid4()),
+        "title": title,
+        "category": category,
+        "description": description,
+        "dql": dql,
+        "dsl": dsl,
+        "lucene": lucene,
+        "author": author,
+        "created_by": author,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with get_db() as conn:
+        doc = load_document(conn, WAZUH_QUERIES_STATE_KEY, None)
+        items = list(doc.get("items")) if isinstance(doc, dict) and isinstance(doc.get("items"), list) else []
+        items.insert(0, item)
+        items = items[:200]
+        save_document(conn, WAZUH_QUERIES_STATE_KEY, {"items": items})
+    return {"item": item, "items": items, "queries": items}
+
+
+@app.delete("/api/wazuh-queries/{query_id}")
+def api_delete_wazuh_query(query_id: str):
+    target = str(query_id or "").strip()
+    if not target:
+        raise HTTPException(status_code=400, detail="ID rumus query tidak valid.")
+    with get_db() as conn:
+        doc = load_document(conn, WAZUH_QUERIES_STATE_KEY, None)
+        items = list(doc.get("items")) if isinstance(doc, dict) and isinstance(doc.get("items"), list) else []
+        filtered = [it for it in items if str(it.get("id") or "") != target]
+        if len(filtered) == len(items):
+            raise HTTPException(status_code=404, detail="Rumus query tidak ditemukan.")
+        save_document(conn, WAZUH_QUERIES_STATE_KEY, {"items": filtered})
+    return {"deleted": target, "items": filtered, "queries": filtered}

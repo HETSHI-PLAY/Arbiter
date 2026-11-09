@@ -131,10 +131,25 @@ class AITriageAPITests(unittest.TestCase):
 
     def test_ai_test_refuses_non_loopback_base_url(self):
         response = self.client.post("/api/ai/test", json={
-            "base_url": "http://192.168.1.50:11434", "model": "hf.co/XHToken/Spark-X2.6-4B-GGUF:Q4_K_M",
+            "base_url": "http://cloud.example.com:11434", "model": "hf.co/XHToken/Spark-X2.6-4B-GGUF:Q4_K_M",
         })
         self.assertEqual(response.status_code, 502)
-        self.assertIn("loopback", response.json()["detail"].lower() + " " + "loopback")
+        self.assertIn("loopback", response.json()["detail"].lower())
+
+    def test_ai_settings_and_test_accept_private_lan_ip_and_strip_api_generate_path(self):
+        model_tag = "hf.co/DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF:Q4_K_M"
+        saved = self.client.put("/api/settings", json={
+            "ai": {
+                "enabled": True,
+                "base_url": "http://192.168.30.178:11434/api/generate",
+                "model": model_tag,
+                "timeout_seconds": 90,
+            }
+        })
+        self.assertEqual(saved.status_code, 200, saved.text)
+        ai_cfg = saved.json()["settings"]["ai"]
+        self.assertEqual(ai_cfg["base_url"], "http://192.168.30.178:11434")
+        self.assertEqual(ai_cfg["model"], model_tag)
 
     # ── Two-stage triage: deterministic clustering → LLM classification ──
 
@@ -616,6 +631,36 @@ class AITriageAPITests(unittest.TestCase):
         })
         self.assertEqual(summary_resp.status_code, 200, summary_resp.text)
         self.assertEqual(summary_resp.json()["alerts"], 2)
+
+    def test_realtime_pull_respects_custom_severity_and_resets_since_on_severity_change(self):
+        self.client.put("/api/settings", json={
+            "wazuh": {"indexer_url": "https://wazuh.lab:9200", "username": "analyst", "password": "stored"},
+            "realtime": {"min_rule_level": 12, "max_rule_level": 14, "last_pull_at": "2026-11-08T10:00:00Z"},
+        })
+        saved_rt = self.client.get("/api/settings").json()["settings"]["realtime"]
+        self.assertEqual(saved_rt["min_rule_level"], 12)
+        self.assertEqual(saved_rt["max_rule_level"], 14)
+
+        # Changing severity in settings without passing last_pull_at resets last_pull_at so new severity can be pulled
+        updated_rt = self.client.put("/api/settings", json={
+            "realtime": {"min_rule_level": 0, "max_rule_level": 6},
+        }).json()["settings"]["realtime"]
+        self.assertEqual(updated_rt["min_rule_level"], 0)
+        self.assertEqual(updated_rt["max_rule_level"], 6)
+        self.assertEqual(updated_rt["last_pull_at"], "")
+
+        captured_kwargs = {}
+        def fake_search(**kwargs):
+            captured_kwargs.update(kwargs)
+            return []
+
+        with patch.object(self.api, "wazuh_search", side_effect=fake_search):
+            pull_resp = self.client.post("/api/realtime/pull", json={"min_rule_level": 15, "max_rule_level": None})
+        self.assertEqual(pull_resp.status_code, 200, pull_resp.text)
+        self.assertEqual(captured_kwargs["min_rule_level"], 15)
+        self.assertIsNone(captured_kwargs["max_rule_level"])
+        self.assertEqual(pull_resp.json()["min_rule_level"], 15)
+        self.assertIsNone(pull_resp.json()["max_rule_level"])
 
 
 if __name__ == "__main__":

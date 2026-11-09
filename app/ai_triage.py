@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core import LocalAIUnavailable, ollama_request
+from app.settings import normalize_ollama_base_url
 from app.wazuh_intel import classify_alert, correlate_alerts
 
 WIB = timezone(timedelta(hours=7))
@@ -644,10 +645,8 @@ def triage_with_fallback(
 
 
 def test_ollama(*, base_url: str, model: str, timeout: float = 8) -> dict[str, Any]:
-    parsed = urllib.parse.urlparse(base_url)
-    if parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
-        raise ValueError("AI lokal hanya boleh memakai http://localhost atau IP loopback.")
-    target = base_url.rstrip("/") + "/api/tags"
+    normalized_base = normalize_ollama_base_url(base_url)
+    target = normalized_base.rstrip("/") + "/api/tags"
     request = urllib.request.Request(target, method="GET", headers={"Accept": "application/json"})
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:

@@ -304,6 +304,59 @@ class SettingsAPITests(unittest.TestCase):
         finally:
             err.close()
 
+    def test_auth_login_roles_and_wazuh_queries_catalog(self):
+        # Unauthenticated check when X-Arbiter-Auth-Enforce is set
+        unauth = self.client.get("/api/tenants", headers={"X-Arbiter-Auth-Enforce": "1"})
+        self.assertEqual(unauth.status_code, 401)
+
+        # Login with default admin account
+        login = self.client.post("/api/auth/login", json={"username": "admin", "password": "arbiter123"})
+        self.assertEqual(login.status_code, 200, login.text)
+        token = login.json()["token"]
+        self.assertEqual(login.json()["user"]["role"], "admin")
+        admin_headers = {"Authorization": f"Bearer {token}"}
+
+        # Admin can create an analyst user
+        created = self.client.post(
+            "/api/auth/users",
+            headers=admin_headers,
+            json={"username": "soc_analyst", "password": "analystPass99", "role": "analyst", "display_name": "SOC L1"},
+        )
+        self.assertEqual(created.status_code, 200, created.text)
+        usernames = [u["username"] for u in created.json()["users"]]
+        self.assertIn("soc_analyst", usernames)
+
+        # Login as analyst
+        analyst_login = self.client.post("/api/auth/login", json={"username": "soc_analyst", "password": "analystPass99"})
+        self.assertEqual(analyst_login.status_code, 200, analyst_login.text)
+        analyst_token = analyst_login.json()["token"]
+        analyst_headers = {"Authorization": f"Bearer {analyst_token}"}
+
+        # Analyst cannot update settings, access database status, or manage users
+        self.assertEqual(
+            self.client.put("/api/settings", headers=analyst_headers, json={"ui": {"sidebar_default": "collapsed"}}).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.get("/api/database", headers=analyst_headers).status_code,
+            403,
+        )
+        self.assertEqual(
+            self.client.get("/api/auth/users", headers=analyst_headers).status_code,
+            403,
+        )
+
+        # Both analyst and admin can access and save Rumus Query Wazuh
+        save_q = self.client.post(
+            "/api/wazuh-queries",
+            headers=analyst_headers,
+            json={"title": "Cek Path Traversal", "dql": "rule.level >= 7 and data.url : \"*..*\"", "category": "Web"},
+        )
+        self.assertEqual(save_q.status_code, 200, save_q.text)
+        queries = save_q.json()["queries"]
+        self.assertEqual(len(queries), 1)
+        self.assertEqual(queries[0]["created_by"], "soc_analyst")
+
 
 if __name__ == "__main__":
     unittest.main()
