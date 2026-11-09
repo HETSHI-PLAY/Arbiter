@@ -81,7 +81,7 @@ def generate_markdown_report(alerts: list[dict[str, Any]], meta: dict[str, Any])
 
     title = meta.get("title") or "SOC Security Telemetry Report"
     category = meta.get("category") or "General Incident"
-    severity = meta.get("severity") or ("High" if highest_lvl >= 10 else "Medium")
+    severity = meta.get("severity") or ("Critical" if highest_lvl >= 15 else "High" if highest_lvl >= 12 else "Medium" if highest_lvl >= 7 else "Low")
     status = meta.get("status") or "Investigating"
 
     lines = [
@@ -187,7 +187,7 @@ def generate_gdocs_html_report(alerts: list[dict[str, Any]], meta: dict[str, Any
         )
         for idx, a in enumerate(alerts, 1):
             lvl = int(a.get("rule_level") or 0)
-            row_lvl = "badge-high" if lvl >= 10 else ("badge-med" if lvl >= 7 else "badge-low")
+            row_lvl = "badge-high" if lvl >= 12 else ("badge-med" if lvl >= 7 else "badge-low")
             hits = int(a.get("hit_count") or 1)
 
             intel_txt = ""

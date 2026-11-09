@@ -58,7 +58,7 @@ export async function mount(ctx) {
         </div>
       </header>
 
-      <div class="settings-layout">
+      <div class="stack" style="width:100%; max-width:none">
         <section class="form-section">
           <div class="split" style="align-items:center; gap:var(--space-2); flex-wrap:wrap; margin-bottom:var(--space-2)">
             <div>

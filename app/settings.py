@@ -541,14 +541,17 @@ def wazuh_search(
     level_range: dict[str, int] = {"gte": int(min_rule_level)}
     if max_rule_level is not None:
         level_range["lte"] = int(max_rule_level)
-    range_query: dict[str, Any] = {"rule.level": level_range}
+    must_clauses: list[dict[str, Any]] = [{"range": {"rule.level": level_range}}]
     if since and str(since).strip():
         ts = _normalize_wazuh_timestamp(str(since))
         if _valid_timestamp(ts):
-            range_query["timestamp"] = {"gte": ts}
+            must_clauses.append({"range": {"timestamp": {"gte": ts}}})
+    query_obj: dict[str, Any] = (
+        must_clauses[0] if len(must_clauses) == 1 else {"bool": {"must": must_clauses}}
+    )
     payload = {
         "size": int(size),
-        "query": {"range": range_query},
+        "query": query_obj,
         "sort": [{"timestamp": {"order": "desc"}}],
     }
     target = f"{base}/{urllib.parse.quote(pattern, safe='*-._,')}/_search"

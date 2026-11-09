@@ -328,9 +328,9 @@ def _profile_for(rule_id: str, description: str, groups: list[str]) -> tuple[str
 
 
 def _level_priority(level: int) -> str:
-    if level >= 12:
+    if level >= 15:
         return "critical"
-    if level >= 10:
+    if level >= 12:
         return "high"
     if level >= 7:
         return "medium"

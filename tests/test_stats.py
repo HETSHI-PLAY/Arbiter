@@ -128,8 +128,8 @@ class StatsEndpointContractTests(unittest.TestCase):
         self.assertEqual(res.status_code, 200, res.text)
         data = res.json()
         keys = {it["key"].lower() for it in data["items"]}
-        # In Alpha we have level 12 (critical), level 7 (medium)
-        self.assertIn("critical", keys)
+        # In Alpha we have level 12 (high, 12-14), level 7 (medium, 7-11)
+        self.assertIn("high", keys)
         self.assertIn("medium", keys)
 
     def test_stats_pivot_by_parsed_http_fields(self):
@@ -186,7 +186,7 @@ class StatsEndpointContractTests(unittest.TestCase):
         res = self.client.get("/api/triage/summary", params={"tenant": "Alpha"})
         self.assertEqual(res.status_code, 200)
         data = res.json()
-        self.assertEqual(data["severity"]["critical"], 2)  # syn-10 and syn-11 (level 12)
+        self.assertEqual(data["severity"]["high"], 2)  # syn-10 and syn-11 (level 12 = High 12-14)
         top_rule = data["top_rule"]
         self.assertIsNotNone(top_rule)
         self.assertEqual(top_rule["rule_id"], "1001")

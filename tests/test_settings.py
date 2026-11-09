@@ -278,8 +278,11 @@ class SettingsAPITests(unittest.TestCase):
             )
         sent = json_module.loads(captured["request"].data.decode("utf-8"))
         self.assertEqual(
-            sent["query"]["range"]["timestamp"]["gte"],
-            "2026-11-06T01:12:41.963193+0000",
+            sent["query"]["bool"]["must"],
+            [
+                {"range": {"rule.level": {"gte": 7}}},
+                {"range": {"timestamp": {"gte": "2026-11-06T01:12:41.963193+0000"}}},
+            ],
         )
         self.assertNotIn("+00:00", json_module.dumps(sent))
 

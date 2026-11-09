@@ -18,7 +18,7 @@ const selection=createSelection(routeScope(new URLSearchParams(location.hash.spl
 let currentRoute, controller, cleanup, guard=null, notifyTimer, healthPending=false, lastHealth=null, routeVersion=0;
 const scrollPositions=new Map();
 let navigationMemory=createNavigationMemory();
-const pageTitles={triage:'Triage',stats:'Statistik',incidents:'Insiden',imports:'Impor',reports:'Laporan',realtime:'Realtime','ai-triage':'AI Triage','wazuh-queries':'Rumus Query Wazuh',database:'Database',settings:'Pengaturan'};
+const pageTitles={triage:'Triage',stats:'Statistik',incidents:'Insiden',imports:'Impor',reports:'Laporan',realtime:'Realtime','ai-triage':'AI Triage','wazuh-queries':'Rumus Query Wazuh','error-codes':'Kamus Error Code',database:'Database',settings:'Pengaturan'};
 const adminOnlyPages=new Set(['database','settings']);
 let currentUser=null, authChecked=false;
 for(const el of document.querySelectorAll('[data-icon]'))el.innerHTML=icon(el.dataset.icon);

@@ -63,12 +63,14 @@ test('settings page exposes Wazuh Indexer credentials, realtime, and sidebar pre
   assert.match(router, /'settings'/);
 });
 
-test('router resolves the settings and wazuh-queries destinations and rejects unknown pages', async () => {
+test('router resolves the settings, wazuh-queries, and error-codes destinations and rejects unknown pages', async () => {
   const {parseRoute} = await import('../../app/static/js/router.js');
   const {normalizeOllamaBaseUrl} = await import('../../app/static/js/features/settings/model.js');
   const {buildWazuhQueries} = await import('../../app/static/js/features/wazuh-queries/model.js');
+  const {ERROR_CODES, ERROR_CODE_SECTIONS, filterErrorCodeSections} = await import('../../app/static/js/features/error-codes/model.js');
   assert.equal(parseRoute('#/settings?tenant=all').page, 'settings');
   assert.equal(parseRoute('#/wazuh-queries?tenant=all').page, 'wazuh-queries');
+  assert.equal(parseRoute('#/error-codes?tenant=all').page, 'error-codes');
   assert.equal(parseRoute('#/settings-does-not-exist').page, 'not-found');
   assert.equal(normalizeOllamaBaseUrl('http://192.168.30.178:11434/api/generate'), 'http://192.168.30.178:11434');
   const built = buildWazuhQueries({severity: '7-11', agent_name: 'web-01', keyword: '/etc/hosts'});
@@ -76,4 +78,11 @@ test('router resolves the settings and wazuh-queries destinations and rejects un
   assert.match(built.dql, /agent\.name : "web-01"/);
   assert.match(built.dsl, /"rule\.level"/);
   assert.match(built.curl, /wazuh-alerts-\*/);
+  assert.ok(ERROR_CODES.length >= 90);
+  assert.ok(ERROR_CODE_SECTIONS.every(sec => sec.group !== 'soc'), 'Wazuh rules removed');
+  const cpanelSections = filterErrorCodeSections(ERROR_CODE_SECTIONS, {category: 'vendor', q: 'cpanel'});
+  const cpanelTable = cpanelSections.find(sec => sec.id === 'vendor-cpanel');
+  assert.ok(cpanelTable, 'cPanel has its own dedicated table section');
+  assert.equal(cpanelTable.title, 'cPanel');
+  assert.equal(cpanelTable.items[0].code, '508');
 });

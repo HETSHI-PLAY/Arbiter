@@ -32,8 +32,8 @@ PIVOT_DEFINITIONS: dict[str, dict[str, str]] = {
         "label": "Severity",
         "sql": (
             "CASE "
-            "WHEN a.rule_level >= 12 THEN 'critical' "
-            "WHEN a.rule_level >= 10 THEN 'high' "
+            "WHEN a.rule_level >= 15 THEN 'critical' "
+            "WHEN a.rule_level >= 12 THEN 'high' "
             "WHEN a.rule_level >= 7 THEN 'medium' "
             "ELSE 'low' END"
         ),

@@ -128,7 +128,7 @@ class ClassificationTests(unittest.TestCase):
             "rule_groups": [],
         })
         self.assertEqual(intel["verdict"], "needs_review")
-        self.assertEqual(intel["priority"], "critical")
+        self.assertEqual(intel["priority"], "high")
         self.assertNotIn("aman", intel["reason"].lower())
         self.assertNotIn("clean", intel["reason"].lower())
 

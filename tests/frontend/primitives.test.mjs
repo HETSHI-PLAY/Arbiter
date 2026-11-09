@@ -8,7 +8,10 @@ test('UI primitives escape data, bound icons and express severity without color 
   assert.equal(esc('<script>"&'), '&lt;script&gt;&quot;&amp;');
   assert.match(icon('search'), /width="16"/);
   assert.match(icon('search'), /aria-hidden="true"/);
-  assert.match(severity(14), /Critical/);
+  assert.match(severity(15), /Critical/);
+  assert.match(severity(14), /High/);
+  assert.match(severity(10), /Medium/);
   assert.match(severity(8), /Medium/);
+  assert.match(severity(6), /Low/);
   assert.equal(statusLabel('in_progress'), 'Dalam investigasi');
 });

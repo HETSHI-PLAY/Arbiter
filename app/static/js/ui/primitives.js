@@ -28,7 +28,7 @@ const paths = {
 };
 export function icon(name) { return `<svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.chevron}</svg>`; }
 export function severity(value) {
-  const key = typeof value === 'number' ? (value >= 12 ? 'critical' : value >= 10 ? 'high' : value >= 7 ? 'medium' : 'low') : String(value || 'low').toLowerCase();
+  const key = typeof value === 'number' ? (value >= 15 ? 'critical' : value >= 12 ? 'high' : value >= 7 ? 'medium' : 'low') : String(value || 'low').toLowerCase();
   const label = {critical:'Critical', high:'High', medium:'Medium', low:'Low'}[key] || 'Unknown';
   return `<span class="badge ${['critical','high','medium','low'].includes(key) ? key : 'neutral'}"><span class="status-dot" aria-hidden="true"></span>${label}</span>`;
 }
