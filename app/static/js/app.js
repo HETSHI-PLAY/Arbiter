@@ -1,4 +1,5 @@
 import {createRouter, withParams} from './router.js';
+import {importFeature} from './feature-loader.js';
 import {json} from './api/client.js';
 import {createSelection} from './state/selection.js';
 import {probeConnection} from './state/workspace.js';
@@ -149,7 +150,7 @@ async function render(route){
     main.innerHTML=`<div class="page-header"><h1>${esc(pageTitles[route.page])}</h1></div>${emptyState('Akses dibatasi untuk Admin','Halaman Pengaturan dan Database hanya dapat diakses oleh akun dengan role Admin. Gunakan menu Rumus Query Wazuh atau Triage untuk operasional analis.',`<a class="button primary" href="${withParams('/triage',scopeParams(scope))}">Buka Triage</a>`)}`;return;
   }
   try{
-    const feature=await import(`./features/${route.page}/view.js`);
+    const feature=await importFeature(route.page);
     if(version!==routeVersion)return;
     const context={root:main,route,navigate:(...args)=>router.navigate(...args),selection,notify,databaseChanged,signal:controller.signal,setGuard:fn=>{guard=fn;}};
     const dispose=await feature.mount(context);
@@ -162,6 +163,7 @@ async function render(route){
     }
   }catch(error){
     if(error.name==='AbortError'||version!==routeVersion)return;
+    console.error(`[Arbiter] Gagal memuat ${route.page}:`, error);
     main.innerHTML=`<h1>${pageTitles[route.page]}</h1>${errorState('Area kerja belum dapat dimuat. Muat ulang untuk mencoba lagi.')}`;
     main.querySelector('[data-action=retry]')?.addEventListener('click',()=>render(route),{signal:controller.signal});
   }
